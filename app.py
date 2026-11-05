@@ -420,93 +420,161 @@ META_CSP_RE = re.compile(
 HEAD_OPEN_RE = re.compile(r"<head(\s[^>]*)?>", re.I)
 
 ASSET_TAG_RE = re.compile(
-    r"<(?:script|link|img|source|video|audio)\b[^>]*>",
+    r"<(?:script|link|img|source|video|audio|iframe|embed|object|form)\b[^>]*>",
     re.I,
 )
 SRC_HREF_ATTR_RE = re.compile(
-    r"(\b(?:src|href)\s*=\s*)([\"'])([^\"']+)\2",
+    r"(\b(?:src|href|poster|data-src|action)\s*=\s*)([\"'])([^\"']+)\2",
+    re.I,
+)
+SRCSET_ATTR_RE = re.compile(
+    r"(\bsrcset\s*=\s*)([\"'])([^\"']+)\2",
     re.I,
 )
 INTEGRITY_ATTR_RE = re.compile(r"\s+\b(?:integrity|crossorigin)\s*=\s*(?:[\"'][^\"']*[\"']|[^\s>]+)", re.I)
 CSS_URL_RE = re.compile(r"url\(\s*([\"']?)([^\"')]+)\1\s*\)", re.I)
+CSS_IMPORT_RE = re.compile(r"(@import\s+)(?:url\(\s*)?([\"'])([^\"')]+)\2(?:\s*\))?", re.I)
+
+STYLE_BLOCK_RE = re.compile(r"(<style\b[^>]*>)(.*?)(</style>)", re.I | re.S)
+STYLE_ATTR_RE = re.compile(r"(\bstyle\s*=\s*)([\"'])(.*?)\2", re.I | re.S)
+
+PUBLIC_CDN_HOSTS = (
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "unpkg.com",
+    "cdn.jsdelivr.net",
+    "cdnjs.cloudflare.com",
+    "images.unsplash.com",
+    "plus.unsplash.com",
+    "www.googletagmanager.com",
+    "www.google-analytics.com",
+    "cdn.tailwindcss.com",
+)
+
+_site_context_lock = threading.Lock()
+_site_by_frame = {}
+_last_proxied_site = {"base_url": "", "frame_id": "default", "device_id": "iphone-15-pro"}
 
 
-def _same_site_host(host_a, host_b):
-    if not host_a or not host_b:
+def _should_proxy_asset_host(base_host, target_host):
+    if not target_host:
         return False
-    ha = host_a.split(":")[0].lower().strip(".")
-    hb = host_b.split(":")[0].lower().strip(".")
-    if ha == hb:
-        return True
-    parts_a = ha.split(".")
-    parts_b = hb.split(".")
-    if len(parts_a) >= 2 and len(parts_b) >= 2:
-        if parts_a[-2:] == parts_b[-2:]:
-            return True
-    return False
+    th = target_host.split(":")[0].lower().strip(".")
+    if th in ("127.0.0.1", "localhost"):
+        return False
+    for cdn in PUBLIC_CDN_HOSTS:
+        if th == cdn or th.endswith("." + cdn):
+            return False
+    return True
 
 
 def _build_proxy_asset_url(abs_url, frame_id, device_id):
-    return f"/proxy?frame={quote(frame_id, safe='')}&device={quote(device_id, safe='')}&url={quote(abs_url, safe='')}"
-
-
-def _rewrite_html_assets_for_proxy(html_text, base_url, frame_id, device_id):
-    """Cuando hay un certificado .p12 activo, reescribe los recursos del mismo
-    sitio (<script src>, <link href>, <img src>, <source src>) para que pasen
-    también por /proxy presentando el certificado cliente."""
-    parsed_base = urlparse(base_url)
-    base_host = parsed_base.hostname or ""
-
-    def _repl_tag(tag_match):
-        tag_str = tag_match.group(0)
-        tag_lower = tag_str.lower()
-        if tag_lower.startswith("<link") and not any(rel in tag_lower for rel in ("stylesheet", "preload", "modulepreload", "icon", "manifest")):
-            return tag_str
-        rewritten_any = [False]
-
-        def _repl_attr(attr_match):
-            attr_prefix, quote_ch, raw_val = attr_match.group(1), attr_match.group(2), attr_match.group(3).strip()
-            if not raw_val or raw_val.startswith(("data:", "blob:", "javascript:", "mailto:", "tel:", "about:", "#", "/proxy?")):
-                return attr_match.group(0)
-            abs_target = urljoin(base_url, raw_val)
-            parsed_target = urlparse(abs_target)
-            if parsed_target.scheme not in ("http", "https"):
-                return attr_match.group(0)
-            if not _same_site_host(base_host, parsed_target.hostname or ""):
-                return attr_match.group(0)
-            rewritten_any[0] = True
-            proxied = _build_proxy_asset_url(abs_target, frame_id, device_id)
-            return f"{attr_prefix}{quote_ch}{html.escape(proxied, quote=True)}{quote_ch}"
-
-        new_tag = SRC_HREF_ATTR_RE.sub(_repl_attr, tag_str)
-        if rewritten_any[0]:
-            new_tag = INTEGRITY_ATTR_RE.sub("", new_tag)
-        return new_tag
-
-    return ASSET_TAG_RE.sub(_repl_tag, html_text)
+    try:
+        origin = request.host_url.rstrip("/")
+    except RuntimeError:
+        origin = ""
+    return f"{origin}/proxy?frame={quote(frame_id, safe='')}&device={quote(device_id, safe='')}&url={quote(abs_url, safe='')}"
 
 
 def _rewrite_css_urls_for_proxy(css_text, base_url, frame_id, device_id):
-    """Reescribe url(...) dentro de archivos CSS servidos por /proxy cuando hay
-    certificado .p12 activo (para fuentes web e imágenes de fondo)."""
+    """Reescribe url(...) y @import dentro de CSS cuando hay certificado .p12
+    activo para que el navegador nunca abra conexiones directas al servidor mTLS."""
     parsed_base = urlparse(base_url)
     base_host = parsed_base.hostname or ""
 
-    def _repl(match):
+    def _repl_url(match):
         quote_ch, raw_val = match.group(1), match.group(2).strip()
-        if not raw_val or raw_val.startswith(("data:", "blob:", "#", "/proxy?")):
+        if not raw_val or raw_val.startswith(("data:", "blob:", "#")) or "/proxy?" in raw_val:
             return match.group(0)
         abs_target = urljoin(base_url, raw_val)
         parsed_target = urlparse(abs_target)
         if parsed_target.scheme not in ("http", "https"):
             return match.group(0)
-        if not _same_site_host(base_host, parsed_target.hostname or ""):
+        if not _should_proxy_asset_host(base_host, parsed_target.hostname or ""):
             return match.group(0)
         proxied = _build_proxy_asset_url(abs_target, frame_id, device_id)
-        q = quote_ch or '"'
-        return f"url({q}{proxied}{q})"
+        return f"url({quote_ch}{proxied}{quote_ch})"
 
-    return CSS_URL_RE.sub(_repl, css_text)
+    def _repl_import(match):
+        prefix, quote_ch, raw_val = match.group(1), match.group(2), match.group(3).strip()
+        if not raw_val or raw_val.startswith(("data:", "blob:", "#")) or "/proxy?" in raw_val:
+            return match.group(0)
+        abs_target = urljoin(base_url, raw_val)
+        parsed_target = urlparse(abs_target)
+        if parsed_target.scheme not in ("http", "https"):
+            return match.group(0)
+        if not _should_proxy_asset_host(base_host, parsed_target.hostname or ""):
+            return match.group(0)
+        proxied = _build_proxy_asset_url(abs_target, frame_id, device_id)
+        return f"{prefix}{quote_ch}{proxied}{quote_ch}"
+
+    out = CSS_IMPORT_RE.sub(_repl_import, css_text)
+    return CSS_URL_RE.sub(_repl_url, out)
+
+
+def _rewrite_html_assets_for_proxy(html_text, base_url, frame_id, device_id):
+    """Cuando hay un certificado .p12 activo, reescribe todos los recursos del
+    sitio (src, href, srcset, poster, action y url() en <style>/style="") a URLs
+    absolutas del proxy local (http://127.0.0.1:5050/proxy?...) para que el
+    navegador jamás conecte directamente al servidor mTLS ni dispare el
+    llavero de macOS."""
+    parsed_base = urlparse(base_url)
+    base_host = parsed_base.hostname or ""
+
+    def _repl_srcset(srcset_match):
+        prefix, quote_ch, raw_srcset = srcset_match.group(1), srcset_match.group(2), srcset_match.group(3)
+        parts = []
+        for item in raw_srcset.split(","):
+            tokens = item.strip().split()
+            if not tokens:
+                continue
+            raw_u = tokens[0]
+            rest = " ".join(tokens[1:])
+            if not raw_u.startswith(("data:", "blob:")) and "/proxy?" not in raw_u:
+                abs_u = urljoin(base_url, raw_u)
+                pt = urlparse(abs_u)
+                if pt.scheme in ("http", "https") and _should_proxy_asset_host(base_host, pt.hostname or ""):
+                    raw_u = _build_proxy_asset_url(abs_u, frame_id, device_id)
+            parts.append(f"{raw_u} {rest}".strip())
+        return f"{prefix}{quote_ch}{', '.join(parts)}{quote_ch}"
+
+    def _repl_tag(tag_match):
+        tag_str = tag_match.group(0)
+        tag_lower = tag_str.lower()
+        if tag_lower.startswith("<link") and not any(rel in tag_lower for rel in ("stylesheet", "preload", "modulepreload", "icon", "manifest", "apple-touch-icon")):
+            return tag_str
+        rewritten_any = [False]
+
+        def _repl_attr(attr_match):
+            attr_prefix, quote_ch, raw_val = attr_match.group(1), attr_match.group(2), attr_match.group(3).strip()
+            if not raw_val or raw_val.startswith(("data:", "blob:", "javascript:", "mailto:", "tel:", "about:", "#")) or "/proxy?" in raw_val:
+                return attr_match.group(0)
+            abs_target = urljoin(base_url, raw_val)
+            parsed_target = urlparse(abs_target)
+            if parsed_target.scheme not in ("http", "https"):
+                return attr_match.group(0)
+            if not _should_proxy_asset_host(base_host, parsed_target.hostname or ""):
+                return attr_match.group(0)
+            rewritten_any[0] = True
+            proxied = _build_proxy_asset_url(abs_target, frame_id, device_id)
+            return f"{attr_prefix}{quote_ch}{proxied}{quote_ch}"
+
+        new_tag = SRC_HREF_ATTR_RE.sub(_repl_attr, tag_str)
+        new_tag = SRCSET_ATTR_RE.sub(_repl_srcset, new_tag)
+        if rewritten_any[0]:
+            new_tag = INTEGRITY_ATTR_RE.sub("", new_tag)
+        return new_tag
+
+    out_html = ASSET_TAG_RE.sub(_repl_tag, html_text)
+    out_html = STYLE_BLOCK_RE.sub(
+        lambda m: m.group(1) + _rewrite_css_urls_for_proxy(m.group(2), base_url, frame_id, device_id) + m.group(3),
+        out_html,
+    )
+    out_html = STYLE_ATTR_RE.sub(
+        lambda m: m.group(1) + m.group(2) + _rewrite_css_urls_for_proxy(m.group(3), base_url, frame_id, device_id) + m.group(2),
+        out_html,
+    )
+    return out_html
 
 
 def get_session(frame_id):
@@ -528,7 +596,7 @@ def get_session(frame_id):
 FRAME_INJECT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "js", "frame-inject.js")
 
 
-def frame_script(frame_id, device_id, cert_proxy_assets=False):
+def frame_script(frame_id, device_id, cert_proxy_assets=False, base_url=""):
     """Script que se inyecta en cada página para que enlaces, formularios y
     peticiones sigan pasando por el proxy (ver static/js/frame-inject.js)."""
     with open(FRAME_INJECT_PATH, encoding="utf-8") as f:
@@ -537,6 +605,7 @@ def frame_script(frame_id, device_id, cert_proxy_assets=False):
         source.replace("__FRAME__", json.dumps(frame_id))
         .replace("__DEVICE__", json.dumps(device_id))
         .replace("__CERT_ACTIVE__", "true" if cert_proxy_assets else "false")
+        .replace("__BASE_URL__", json.dumps(base_url or ""))
     )
     return "<script>" + source.replace("</", "<\\/") + "</script>"
 
@@ -586,12 +655,7 @@ def index():
 FORWARDED_REQUEST_HEADERS = ("Content-Type", "Authorization")
 
 
-@app.route("/proxy", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
-def proxy():
-    url = (request.args.get("url") or "").strip()
-    frame_id = re.sub(r"[^A-Za-z0-9_-]", "", request.args.get("frame", ""))[:64] or "default"
-    device = DEVICES_BY_ID.get(request.args.get("device", ""))
-
+def _execute_proxy(url, frame_id, device):
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return error_page("invalid_url", url)
@@ -623,15 +687,13 @@ def proxy():
     data = None
     if request.method != "GET":
         data = request.get_data()
-        # Muchos sitios rechazan un POST (login, CSRF) si Origin/Referer no son
-        # los suyos. El navegador mandaría los del visor, así que ponemos los del sitio.
         headers["Origin"] = site
         headers["Referer"] = site + "/"
     else:
         headers["Referer"] = site + "/"
 
     sec_dest = request.headers.get("Sec-Fetch-Dest", "")
-    is_document = sec_dest in ("iframe", "frame", "document", "") and request.method == "GET"
+    is_document = sec_dest in ("iframe", "frame", "document")
     t0 = time.time()
 
     try:
@@ -651,11 +713,19 @@ def proxy():
     dur = round((time.time() - t0) * 1000)
     content_type = upstream.headers.get("Content-Type", "")
     body = upstream.content
+    final_url = upstream.url or url
+
+    is_html_doc = "text/html" in content_type.lower() and (is_document or sec_dest in ("", "empty"))
+
+    if is_html_doc:
+        with _site_context_lock:
+            _site_by_frame[frame_id] = {"base_url": final_url, "device_id": device["id"]}
+            _last_proxied_site.update({"base_url": final_url, "frame_id": frame_id, "device_id": device["id"]})
 
     record_traffic(
         device,
         request.method,
-        upstream.url or url,
+        final_url,
         headers,
         data,
         upstream.status_code,
@@ -663,21 +733,30 @@ def proxy():
         upstream.headers,
         body,
         dur,
-        is_document,
+        is_html_doc,
     )
 
     with _cert_lock:
         cert_proxy_assets = bool(_cert_state["active"] and _cert_state["proxy_assets"])
 
-    if "text/html" in content_type.lower() and is_document:
+    if is_html_doc:
         if "charset" not in content_type.lower():
-            # Sin charset en la cabecera, requests asume ISO-8859-1; mejor adivinar.
             upstream.encoding = upstream.apparent_encoding or "utf-8"
         text = upstream.text
         text = META_CSP_RE.sub("", text)
         if cert_proxy_assets:
-            text = _rewrite_html_assets_for_proxy(text, upstream.url or url, frame_id, device["id"])
-        injection = f'<base href="{html.escape(upstream.url, quote=True)}">' + frame_script(frame_id, device["id"], cert_proxy_assets=cert_proxy_assets)
+            text = _rewrite_html_assets_for_proxy(text, final_url, frame_id, device["id"])
+            # Sin <base href="https://..."> cuando .p12 está activo: así Chrome jamás conecta
+            # directamente al servidor mTLS ni abre el diálogo de contraseña del Llavero de macOS.
+            injection = (
+                '<link rel="icon" href="data:,">'
+                + frame_script(frame_id, device["id"], cert_proxy_assets=True, base_url=final_url)
+            )
+        else:
+            injection = (
+                f'<base href="{html.escape(final_url, quote=True)}">'
+                + frame_script(frame_id, device["id"], cert_proxy_assets=False, base_url=final_url)
+            )
         if HEAD_OPEN_RE.search(text):
             text = HEAD_OPEN_RE.sub(lambda m: m.group(0) + injection, text, count=1)
         else:
@@ -687,7 +766,7 @@ def proxy():
     elif "text/css" in content_type.lower() and cert_proxy_assets:
         if "charset" not in content_type.lower():
             upstream.encoding = upstream.apparent_encoding or "utf-8"
-        css_text = _rewrite_css_urls_for_proxy(upstream.text, upstream.url or url, frame_id, device["id"])
+        css_text = _rewrite_css_urls_for_proxy(upstream.text, final_url, frame_id, device["id"])
         body = css_text.encode("utf-8")
         content_type = "text/css; charset=utf-8"
 
@@ -699,6 +778,60 @@ def proxy():
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
+
+
+@app.route("/proxy", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+def proxy():
+    url = (request.args.get("url") or "").strip()
+    frame_id = re.sub(r"[^A-Za-z0-9_-]", "", request.args.get("frame", ""))[:64] or "default"
+    device = DEVICES_BY_ID.get(request.args.get("device", ""))
+    return _execute_proxy(url, frame_id, device)
+
+
+@app.errorhandler(404)
+def catch_all_relative_proxy( _err):
+    """Si una página dentro del iframe pide una ruta relativa directa al visor
+    (p. ej. /assets/chunk.js, /api/datos, /img/bg.png) cuando no hay <base href>,
+    la redirige transparentemente por _execute_proxy usando el certificado .p12."""
+    req_path = request.path or "/"
+    if req_path == "/favicon.ico":
+        return Response(b"", status=204, mimetype="image/x-icon")
+
+    ref = request.headers.get("Referer", "")
+    frame_id = ""
+    device_id = ""
+    base_url = ""
+
+    if "/proxy" in ref:
+        try:
+            from urllib.parse import parse_qs
+            ref_parsed = urlparse(ref)
+            qs = parse_qs(ref_parsed.query)
+            frame_id = (qs.get("frame") or [""])[0]
+            device_id = (qs.get("device") or [""])[0]
+            base_url = (qs.get("url") or [""])[0]
+        except Exception:
+            pass
+
+    with _site_context_lock:
+        if not base_url and frame_id and frame_id in _site_by_frame:
+            base_url = _site_by_frame[frame_id]["base_url"]
+            device_id = device_id or _site_by_frame[frame_id]["device_id"]
+        if not base_url and _last_proxied_site["base_url"]:
+            base_url = _last_proxied_site["base_url"]
+            frame_id = frame_id or _last_proxied_site["frame_id"]
+            device_id = device_id or _last_proxied_site["device_id"]
+
+    if not base_url:
+        return Response("Not Found", status=404)
+
+    frame_id = re.sub(r"[^A-Za-z0-9_-]", "", frame_id)[:64] or "default"
+    device = DEVICES_BY_ID.get(device_id) or DEVICES_BY_ID.get(frame_id) or DEVICES[0]
+    parsed_base = urlparse(base_url)
+    site_root = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    qs_str = ("?" + request.query_string.decode("utf-8", errors="ignore")) if request.query_string else ""
+    target_url = urljoin(site_root, req_path) + qs_str
+    return _execute_proxy(target_url, frame_id, device)
 
 
 @app.route("/api/reset", methods=["POST"])

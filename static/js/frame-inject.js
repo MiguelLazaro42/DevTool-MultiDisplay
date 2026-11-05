@@ -11,10 +11,15 @@
   "use strict";
   var F = __FRAME__, D = __DEVICE__;
   var CERT_ACTIVE = (typeof __CERT_ACTIVE__ !== "undefined") ? !!__CERT_ACTIVE__ : false;
+  var BASE_URL = (typeof __BASE_URL__ === "string" && __BASE_URL__) ? __BASE_URL__ : document.baseURI;
   var ORIGIN = location.origin;
 
   function abs(u) {
-    try { return new URL(u, document.baseURI).href; } catch (_e) { return null; }
+    if (!u) return null;
+    var s = String(u).trim();
+    if (!s || /^(data:|blob:|javascript:|mailto:|tel:|about:|#)/i.test(s)) return null;
+    if (s.indexOf("/proxy?") === 0 || s.indexOf(ORIGIN + "/proxy?") === 0) return null;
+    try { return new URL(s, BASE_URL || document.baseURI).href; } catch (_e) { return null; }
   }
   function proxiable(u) {
     return !!u && /^https?:/i.test(u) && new URL(u).origin !== ORIGIN;
@@ -27,7 +32,7 @@
   function isSameSiteAsset(u) {
     if (!proxiable(u)) return false;
     try {
-      var baseHost = new URL(document.baseURI).hostname.toLowerCase();
+      var baseHost = new URL(BASE_URL || document.baseURI).hostname.toLowerCase();
       var targetHost = new URL(u).hostname.toLowerCase();
       if (baseHost === targetHost) return true;
       var bp = baseHost.split(".");
@@ -39,34 +44,95 @@
     return false;
   }
 
-  if (CERT_ACTIVE && typeof MutationObserver === "function") {
-    var certAssetObs = new MutationObserver(function (mutations) {
-      for (var i = 0; i < mutations.length; i++) {
-        var added = mutations[i].addedNodes;
-        if (!added) continue;
-        for (var j = 0; j < added.length; j++) {
-          var node = added[j];
-          if (!node || node.nodeType !== 1) continue;
-          var tag = (node.tagName || "").toLowerCase();
-          if (tag === "script" || tag === "img" || tag === "source") {
-            var rawSrc = node.getAttribute("src");
-            if (rawSrc && rawSrc.indexOf("/proxy?") === -1) {
-              var absSrc = abs(rawSrc);
-              if (isSameSiteAsset(absSrc)) node.setAttribute("src", via(absSrc));
+  function rewriteAssetUrlIfNeeded(rawVal) {
+    if (!CERT_ACTIVE || !rawVal) return rawVal;
+    var s = String(rawVal).trim();
+    if (!s || s.indexOf("/proxy?") > -1 || /^(data:|blob:|javascript:|mailto:|tel:|about:|#)/i.test(s)) {
+      return rawVal;
+    }
+    var absUrl = abs(s);
+    if (absUrl && isSameSiteAsset(absUrl)) {
+      return via(absUrl);
+    }
+    return rawVal;
+  }
+
+  if (CERT_ACTIVE) {
+    // 1. Interceptar setAttribute(src/href/poster) para que ningún recurso creado por JS conecte directo al servidor mTLS
+    var origSetAttr = Element.prototype.setAttribute;
+    if (origSetAttr) {
+      Element.prototype.setAttribute = function (name, val) {
+        try {
+          var attrLower = String(name || "").toLowerCase();
+          var tag = (this.tagName || "").toLowerCase();
+          if ((attrLower === "src" || attrLower === "poster") && (tag === "img" || tag === "script" || tag === "source" || tag === "video" || tag === "audio" || tag === "iframe")) {
+            val = rewriteAssetUrlIfNeeded(val);
+          } else if (attrLower === "href" && tag === "link") {
+            val = rewriteAssetUrlIfNeeded(val);
+          } else if (attrLower === "style" && typeof val === "string" && val.indexOf("url(") > -1) {
+            val = val.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, function (match, quote, innerUrl) {
+              var rewritten = rewriteAssetUrlIfNeeded(innerUrl);
+              return "url(" + quote + rewritten + quote + ")";
+            });
+          }
+        } catch (_e) {}
+        return origSetAttr.call(this, name, val);
+      };
+    }
+
+    // 2. Interceptar setters directos (.src / .href) en prototipos de elementos multimedia/scripts
+    function patchUrlProperty(proto, propName) {
+      if (!proto) return;
+      try {
+        var desc = Object.getOwnPropertyDescriptor(proto, propName);
+        if (desc && typeof desc.set === "function") {
+          Object.defineProperty(proto, propName, {
+            configurable: true,
+            enumerable: desc.enumerable,
+            get: desc.get,
+            set: function (val) {
+              return desc.set.call(this, rewriteAssetUrlIfNeeded(val));
             }
-          } else if (tag === "link") {
-            var rawHref = node.getAttribute("href");
-            if (rawHref && rawHref.indexOf("/proxy?") === -1) {
-              var absHref = abs(rawHref);
-              if (isSameSiteAsset(absHref)) node.setAttribute("href", via(absHref));
+          });
+        }
+      } catch (_e) {}
+    }
+
+    if (typeof HTMLImageElement !== "undefined") patchUrlProperty(HTMLImageElement.prototype, "src");
+    if (typeof HTMLScriptElement !== "undefined") patchUrlProperty(HTMLScriptElement.prototype, "src");
+    if (typeof HTMLLinkElement !== "undefined") patchUrlProperty(HTMLLinkElement.prototype, "href");
+    if (typeof HTMLSourceElement !== "undefined") patchUrlProperty(HTMLSourceElement.prototype, "src");
+    if (typeof HTMLMediaElement !== "undefined") patchUrlProperty(HTMLMediaElement.prototype, "src");
+
+    if (typeof MutationObserver === "function") {
+      var certAssetObs = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var added = mutations[i].addedNodes;
+          if (!added) continue;
+          for (var j = 0; j < added.length; j++) {
+            var node = added[j];
+            if (!node || node.nodeType !== 1) continue;
+            var tag = (node.tagName || "").toLowerCase();
+            if (tag === "script" || tag === "img" || tag === "source") {
+              var rawSrc = node.getAttribute("src");
+              if (rawSrc && rawSrc.indexOf("/proxy?") === -1) {
+                var proxSrc = rewriteAssetUrlIfNeeded(rawSrc);
+                if (proxSrc !== rawSrc) origSetAttr.call(node, "src", proxSrc);
+              }
+            } else if (tag === "link") {
+              var rawHref = node.getAttribute("href");
+              if (rawHref && rawHref.indexOf("/proxy?") === -1) {
+                var proxHref = rewriteAssetUrlIfNeeded(rawHref);
+                if (proxHref !== rawHref) origSetAttr.call(node, "href", proxHref);
+              }
             }
           }
         }
-      }
-    });
-    try {
-      certAssetObs.observe(document.documentElement || document, { childList: true, subtree: true });
-    } catch (_e) {}
+      });
+      try {
+        certAssetObs.observe(document.documentElement || document, { childList: true, subtree: true });
+      } catch (_e) {}
+    }
   }
 
   // ---------- Enlaces ----------
@@ -77,9 +143,11 @@
     var a = e.target.closest && e.target.closest("a[href]");
     if (!a || a.hasAttribute("download")) return;
     if (a.target && a.target !== "_self") return;
-    var href = a.href;
+    var rawHref = a.getAttribute("href") || "";
+    if (!rawHref || rawHref.charAt(0) === "#" || /^javascript:/i.test(rawHref)) return;
+    var href = abs(rawHref) || a.href;
     if (!proxiable(href)) return;
-    var here = document.baseURI.split("#")[0];
+    var here = (BASE_URL || document.baseURI).split("#")[0];
     if (href.split("#")[0] === here && href.indexOf("#") > -1) return; // ancla en la misma página
     e.preventDefault();
     location.href = via(href);
@@ -92,7 +160,9 @@
     };
     var target = attr("target", "");
     if (target && target !== "_self") return null;
-    var action = abs(attr("action", document.baseURI));
+    var rawAction = attr("action", BASE_URL || document.baseURI);
+    if (rawAction && rawAction.indexOf("/proxy?") > -1) return null;
+    var action = abs(rawAction) || (BASE_URL || document.baseURI);
     if (!proxiable(action)) return null;
     return { method: attr("method", "get").toLowerCase(), action: action };
   }
@@ -162,7 +232,7 @@
   // Para que Refrescar recargue la página donde está esta pantalla, y para obtener el endpoint actual.
   function getCurrentPageUrl() {
     try {
-      var base = document.baseURI || "";
+      var base = BASE_URL || document.baseURI || "";
       if (location.pathname && location.pathname !== "/proxy") {
         return new URL(location.pathname + location.search + location.hash, base).href;
       }
@@ -171,7 +241,7 @@
       }
       return base;
     } catch (_e) {
-      return document.baseURI || location.href;
+      return BASE_URL || document.baseURI || location.href;
     }
   }
 
@@ -1386,7 +1456,7 @@
     var text = (mainEl.innerText || mainEl.getAttribute("aria-label") || mainEl.getAttribute("title") || mainEl.getAttribute("placeholder") || mainEl.value || "").replace(/\s+/g, " ").trim().slice(0, 80);
     var aEl = target.closest && target.closest("a[href]");
     var href = aEl ? aEl.getAttribute("href") : "";
-    var absHref = aEl ? aEl.href : "";
+    var absHref = aEl ? (abs(href) || aEl.href) : "";
     var bestSel = interactive ? getSelector(interactive, false) : getSelector(target, false);
 
     var box = getElementBox(mainEl);
@@ -1787,7 +1857,7 @@
           }
           setTimeout(reportTemplateContext, 200);
         } else if (d.absHref && proxiable(d.absHref)) {
-          var here = document.baseURI.split("#")[0];
+          var here = (BASE_URL || document.baseURI).split("#")[0];
           if (d.absHref.split("#")[0] !== here || d.absHref.indexOf("#") === -1) {
             location.href = via(d.absHref);
           }
