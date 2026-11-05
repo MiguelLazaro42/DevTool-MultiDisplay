@@ -55,21 +55,17 @@
   var toastEl = document.getElementById("toast");
   var syncBtn = document.getElementById("sync-btn");
 
-  // Elementos del Inspector Docked (no bloqueante)
+  // Elementos del Inspector Flotante (estilo IDE)
   var inspectBtn = document.getElementById("inspect-btn");
-  var inspectPanel = document.getElementById("inspect-panel");
-  var inspectEmpty = document.getElementById("inspect-empty");
-  var inspectDetails = document.getElementById("inspect-details");
+  var inspectBanner = document.getElementById("inspect-banner");
+  var inspectFloat = document.getElementById("inspect-float");
+  var inspectCopiedPill = document.getElementById("inspect-copied-pill");
   var inspectBadge = document.getElementById("inspect-badge");
   var inspectDim = document.getElementById("inspect-dim");
   var inspectSelector = document.getElementById("inspect-selector");
   var inspectCode = document.getElementById("inspect-code");
   var inspectClose = document.getElementById("inspect-close");
-  var inspectCopyHtml = document.getElementById("inspect-copy-html");
-  var inspectCopySelector = document.getElementById("inspect-copy-selector");
-  var inspectAutoCopy = document.getElementById("inspect-autocopy");
-  var currentInspectedHtml = "";
-  var currentInspectedSelector = "";
+  var copiedPillTimer = null;
 
   // ---------- Utilidades ----------
   function store(key, value) {
@@ -734,8 +730,14 @@
     var d = ev.data;
     if (d.type === "rv:navigated") {
       if (els[d.frame]) state.frameUrls[d.frame] = d.url;
+    } else if (d.type === "rv:element_hover") {
+      showInspectorHover(d);
+    } else if (d.type === "rv:element_leave") {
+      hideInspectorFloat();
     } else if (d.type === "rv:element_picked") {
-      showInspectorData(d);
+      onInspectorPicked(d);
+    } else if (d.type === "rv:exit_inspector") {
+      if (state.inspector) toggleInspector(false);
     } else if (d.type === "rv:sync_scroll") {
       if (!state.sync) return;
       broadcastToOtherFrames(d.frame, {
@@ -811,26 +813,7 @@
     });
   }
 
-  // ---------- Inspector de Elementos ----------
-  function formatHtml(raw) {
-    if (!raw) return "";
-    var formatted = "";
-    var pad = 0;
-    var tokens = raw.replace(/>\s*</g, "><").replace(/</g, "~#~<").split("~#~");
-    tokens.forEach(function (token) {
-      token = token.trim();
-      if (!token) return;
-      if (token.match(/^<\/\w/)) {
-        pad = Math.max(0, pad - 1);
-      }
-      formatted += "  ".repeat(pad) + token + "\n";
-      if (token.match(/^<\w[^>]*[^\/]>$/) && !token.match(/^<(input|img|br|hr|meta|link|col|base|source|area)/i)) {
-        pad++;
-      }
-    });
-    return formatted.trim() || raw;
-  }
-
+  // ---------- Inspector de Elementos Flotante (Estilo IDE) ----------
   function copyText(text, successMsg) {
     if (!text) return;
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -860,23 +843,23 @@
     ta.remove();
   }
 
+  function hideInspectorFloat() {
+    if (inspectFloat) inspectFloat.hidden = true;
+  }
+
   function toggleInspector(on) {
     if (on === undefined) on = !state.inspector;
-    state.inspector = on;
+    state.inspector = !!on;
 
-    if (matEl) {
-      matEl.classList.toggle("has-inspector", state.inspector);
-    }
     if (inspectBtn) {
       inspectBtn.setAttribute("aria-pressed", state.inspector ? "true" : "false");
       inspectBtn.classList.toggle("is-active", state.inspector);
     }
-    if (inspectPanel) {
-      inspectPanel.hidden = !state.inspector;
-      if (!state.inspector) {
-        if (inspectEmpty) inspectEmpty.hidden = false;
-        if (inspectDetails) inspectDetails.hidden = true;
-      }
+    if (inspectBanner) {
+      inspectBanner.hidden = !state.inspector;
+    }
+    if (!state.inspector) {
+      hideInspectorFloat();
     }
 
     state.active.forEach(function (id) {
@@ -890,35 +873,57 @@
         } catch (_e) {}
       }
     });
-
-    if (state.inspector) {
-      toast(t("inspectActive"));
-    }
-    // Re-acomodar las pantallas al cambiar el ancho del escenario
-    setTimeout(layout, 60);
   }
 
-  function closeInspectorPanel() {
-    toggleInspector(false);
-  }
-
-  function showInspectorData(data) {
-    // Flujo ágil continuo: ¡Mantiene el inspector activo!
-    currentInspectedHtml = data.html || "";
-    currentInspectedSelector = data.selector || "";
+  function showInspectorHover(data) {
+    if (!state.inspector || !inspectFloat) return;
+    var item = els[data.frame];
+    if (!item || !item.iframe) return;
 
     if (inspectBadge) inspectBadge.textContent = "<" + (data.tag || "element") + ">";
     if (inspectDim) inspectDim.textContent = (data.width && data.height) ? (data.width + "×" + data.height + " px") : "";
     if (inspectSelector) inspectSelector.textContent = data.selector || "";
-    if (inspectCode) inspectCode.textContent = formatHtml(data.html || "");
+    if (inspectCode) inspectCode.textContent = data.foldedHtml || "";
 
-    if (inspectEmpty) inspectEmpty.hidden = true;
-    if (inspectDetails) inspectDetails.hidden = false;
+    inspectFloat.hidden = false;
 
-    // Si Auto-copiar está activado, copia de inmediato al portapapeles sin pasos extra
-    if (inspectAutoCopy && inspectAutoCopy.checked) {
-      copyText(currentInspectedHtml, t("copiedHtml"));
+    // Convertir coordenadas internas del iframe a coordenadas de la ventana principal
+    var ir = item.iframe.getBoundingClientRect();
+    var devScale = item.scale || state.scale || 1;
+    var px = ir.left + (data.clientX || 0) * devScale;
+    var py = ir.top + (data.clientY || 0) * devScale;
+
+    var fw = inspectFloat.offsetWidth || 320;
+    var fh = inspectFloat.offsetHeight || 160;
+    var margin = 16;
+
+    var x = px + 18;
+    var y = py + 18;
+    if (x + fw + margin > window.innerWidth) {
+      x = Math.max(margin, px - fw - 16);
     }
+    if (y + fh + margin > window.innerHeight) {
+      y = Math.max(margin, py - fh - 16);
+    }
+    inspectFloat.style.transform = "translate3d(" + Math.round(x) + "px," + Math.round(y) + "px,0)";
+  }
+
+  function onInspectorPicked(data) {
+    if (!state.inspector) return;
+    // Al dar clic se copia el elemento completo al portapapeles sin salir del modo inspección
+    copyText(data.html || "", t("copiedHtml"));
+
+    if (inspectFloat) {
+      inspectFloat.classList.add("is-copied");
+    }
+    if (inspectCopiedPill) {
+      inspectCopiedPill.hidden = false;
+    }
+    clearTimeout(copiedPillTimer);
+    copiedPillTimer = setTimeout(function () {
+      if (inspectFloat) inspectFloat.classList.remove("is-copied");
+      if (inspectCopiedPill) inspectCopiedPill.hidden = true;
+    }, 1100);
   }
 
   if (inspectBtn) {
@@ -927,16 +932,8 @@
     });
   }
   if (inspectClose) {
-    inspectClose.addEventListener("click", closeInspectorPanel);
-  }
-  if (inspectCopyHtml) {
-    inspectCopyHtml.addEventListener("click", function () {
-      copyText(currentInspectedHtml, t("copiedHtml"));
-    });
-  }
-  if (inspectCopySelector) {
-    inspectCopySelector.addEventListener("click", function () {
-      copyText(currentInspectedSelector, t("copiedSelector"));
+    inspectClose.addEventListener("click", function () {
+      toggleInspector(false);
     });
   }
 

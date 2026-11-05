@@ -167,11 +167,80 @@
     return path.join(" > ");
   }
 
+  function openTagStr(el, maxAttrs) {
+    var tag = el.tagName.toLowerCase();
+    var out = "<" + tag;
+    var attrs = el.attributes;
+    if (attrs && attrs.length) {
+      var shown = 0;
+      var limit = maxAttrs || 3;
+      for (var i = 0; i < attrs.length; i++) {
+        var a = attrs[i];
+        if (shown >= limit) {
+          out += " …";
+          break;
+        }
+        var val = (a.value || "").replace(/\s+/g, " ").trim();
+        if (val.length > 34) val = val.slice(0, 31) + "…";
+        out += " " + a.name + '="' + val.replace(/"/g, "&quot;") + '"';
+        shown++;
+      }
+    }
+    return out + ">";
+  }
+
+  // Genera una vista previa del HTML plegada (colapsada) estilo IDE
+  function buildFoldedPreview(el) {
+    if (!el || !el.tagName) return "";
+    var tag = el.tagName.toLowerCase();
+    var voidTags = /^(img|input|br|hr|meta|link|source|area|base|col|embed|param|track|wbr)$/i;
+    if (voidTags.test(tag)) {
+      return openTagStr(el, 4);
+    }
+    if (tag === "svg") {
+      return "▸ " + openTagStr(el, 2) + " ⋯ </svg>";
+    }
+
+    var children = el.children ? Array.prototype.slice.call(el.children) : [];
+    if (children.length === 0) {
+      var txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!txt) return openTagStr(el, 3) + "</" + tag + ">";
+      if (txt.length <= 54) {
+        return openTagStr(el, 3) + txt + "</" + tag + ">";
+      }
+      return "▾ " + openTagStr(el, 3) + "\n  ▸ \"" + txt.slice(0, 50) + "…\" [texto plegado]\n</" + tag + ">";
+    }
+
+    var lines = ["▾ " + openTagStr(el, 3)];
+    var maxShow = 3;
+    for (var i = 0; i < Math.min(children.length, maxShow); i++) {
+      var c = children[i];
+      var cTag = c.tagName.toLowerCase();
+      if (voidTags.test(cTag)) {
+        lines.push("    " + openTagStr(c, 2));
+      } else if (c.children && c.children.length > 0) {
+        lines.push("  ▸ " + openTagStr(c, 2) + " ⋯ </" + cTag + "> (" + c.children.length + ")");
+      } else {
+        var cTxt = (c.textContent || "").replace(/\s+/g, " ").trim();
+        if (cTxt.length > 36) {
+          lines.push("  ▸ " + openTagStr(c, 2) + cTxt.slice(0, 32) + "… </" + cTag + ">");
+        } else {
+          lines.push("    " + openTagStr(c, 2) + cTxt + "</" + cTag + ">");
+        }
+      }
+    }
+    if (children.length > maxShow) {
+      lines.push("  ⋯ +" + (children.length - maxShow) + " elementos plegados");
+    }
+    lines.push("</" + tag + ">");
+    return lines.join("\n");
+  }
+
   function onInspectMove(e) {
     if (!inspectorActive) return;
     var target = e.target;
     if (!target || target === overlayEl || (overlayEl && overlayEl.contains(target))) return;
-    if (target === document.documentElement || target === document.body) return;
+    if (target === document.documentElement) return;
 
     ensureInspectorOverlay();
     var r = target.getBoundingClientRect();
@@ -184,17 +253,40 @@
     overlayEl.style.height = r.height + "px";
     overlayEl.style.display = "block";
 
-    var label = target.tagName.toLowerCase();
+    var tag = target.tagName.toLowerCase();
+    var label = tag;
     if (target.id) label += "#" + target.id;
     else if (target.classList && target.classList.length) label += "." + target.classList[0];
-    label += " | " + Math.round(r.width) + "×" + Math.round(r.height);
 
-    badgeEl.textContent = label;
+    badgeEl.textContent = label + " | " + Math.round(r.width) + "×" + Math.round(r.height);
     if (r.top < 32) {
       badgeEl.style.top = (r.height + 4) + "px";
     } else {
       badgeEl.style.top = "-26px";
     }
+
+    try {
+      parent.postMessage({
+        type: "rv:element_hover",
+        frame: F,
+        device: D,
+        tag: label,
+        selector: getSelector(target),
+        foldedHtml: buildFoldedPreview(target),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        clientX: e.clientX,
+        clientY: e.clientY
+      }, ORIGIN);
+    } catch (_e) {}
+  }
+
+  function onInspectLeave() {
+    if (!inspectorActive) return;
+    if (overlayEl) overlayEl.style.display = "none";
+    try {
+      parent.postMessage({ type: "rv:element_leave", frame: F }, ORIGIN);
+    } catch (_e) {}
   }
 
   function onInspectClick(e) {
@@ -205,6 +297,18 @@
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
+
+    // Destello verde de confirmación al copiar
+    if (overlayEl) {
+      overlayEl.style.borderColor = "#22c55e";
+      overlayEl.style.background = "rgba(34, 197, 94, 0.26)";
+      setTimeout(function () {
+        if (overlayEl) {
+          overlayEl.style.borderColor = "#1a73e8";
+          overlayEl.style.background = "rgba(26, 115, 232, 0.18)";
+        }
+      }, 280);
+    }
 
     var r = target.getBoundingClientRect();
     var tag = target.tagName.toLowerCase();
@@ -226,7 +330,16 @@
   }
 
   window.addEventListener("mousemove", onInspectMove, true);
+  document.documentElement.addEventListener("mouseleave", onInspectLeave, true);
   window.addEventListener("click", onInspectClick, true);
+  window.addEventListener("keydown", function (e) {
+    if (inspectorActive && e.key === "Escape") {
+      e.preventDefault();
+      try {
+        parent.postMessage({ type: "rv:exit_inspector" }, ORIGIN);
+      } catch (_e) {}
+    }
+  }, true);
 
   // ---------- Sincronización Multi-Dispositivo (Scroll, Clics, Inputs) ----------
   var syncActive = true;

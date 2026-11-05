@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=3">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=5">
 </head>
 <body>
   <main class="mat" aria-label="Screens" data-i18n-aria-label="screens">
@@ -44,67 +44,30 @@
       <p class="mat-hint" data-i18n="scrollHint">Scroll on the mat to move every screen at once</p>
     </div>
 
-    <!-- Panel Lateral de Inspección (Docked & Non-blocking) -->
-    <aside class="inspect-panel" id="inspect-panel" aria-label="Inspector" hidden>
-      <header class="inspect-panel-header">
-        <div class="inspect-status">
-          <span class="inspect-dot" aria-hidden="true"></span>
-          <span class="inspect-status-title" data-i18n="inspect">Inspector</span>
-        </div>
-        <div class="inspect-header-actions">
-          <label class="inspect-autocopy-label" title="Copiar HTML automáticamente al hacer clic en un elemento" data-i18n-title="autoCopyHint">
-            <input type="checkbox" id="inspect-autocopy">
-            <span data-i18n="autoCopy">Auto-copiar</span>
-          </label>
-          <button type="button" class="inspect-btn-icon" id="inspect-close" aria-label="Cerrar inspector" data-i18n-aria-label="close" title="Cerrar (Esc)">
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
-          </button>
-        </div>
-      </header>
+    <!-- Banner permanente de instrucciones mientras el modo Inspección está activo -->
+    <div class="inspect-banner" id="inspect-banner" role="status" hidden>
+      <span class="inspect-dot" aria-hidden="true"></span>
+      <span class="inspect-banner-text" data-i18n-html="inspectBanner">
+        <strong>Modo Inspección</strong> · Pasa el mouse para ver · <strong>Da clic</strong> para copiar al portapapeles · Presiona <kbd>Esc</kbd> para salir
+      </span>
+      <button type="button" class="inspect-banner-close" id="inspect-close" aria-label="Cerrar inspector" data-i18n-aria-label="close" title="Esc">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
+      </button>
+    </div>
 
-      <div class="inspect-panel-body">
-        <div class="inspect-empty" id="inspect-empty">
-          <svg viewBox="0 0 24 24" class="inspect-empty-icon" aria-hidden="true">
-            <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/>
-            <circle cx="12" cy="12" r="3" fill="currentColor"/>
-            <path d="M12 3v3M12 18v3M3 12h3M18 12h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-          </svg>
-          <p class="inspect-empty-title" data-i18n="inspectSelectPrompt">Haz clic en cualquier elemento</p>
-          <p class="inspect-empty-sub" data-i18n="inspectSelectHint">Pasa el ratón sobre cualquier pantalla y haz clic para ver y copiar su código al instante.</p>
-        </div>
-
-        <div class="inspect-details" id="inspect-details" hidden>
-          <div class="inspect-element-bar">
-            <span class="inspect-tag-badge" id="inspect-badge">&lt;element&gt;</span>
-            <span class="inspect-dim-badge" id="inspect-dim">0×0</span>
-          </div>
-
-          <div class="inspect-section">
-            <div class="inspect-section-header">
-              <span class="inspect-section-label">Selector CSS</span>
-              <button type="button" class="btn-copy-chip" id="inspect-copy-selector" title="Copiar selector">
-                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M4 13V4a1 1 0 0 1 1-1h9"/></svg>
-                <span data-i18n="copy">Copiar</span>
-              </button>
-            </div>
-            <code class="inspect-selector" id="inspect-selector"></code>
-          </div>
-
-          <div class="inspect-section inspect-code-section">
-            <div class="inspect-section-header">
-              <span class="inspect-section-label">HTML (outerHTML)</span>
-              <button type="button" class="btn btn-inspect-copy" id="inspect-copy-html">
-                <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M4 13V4a1 1 0 0 1 1-1h9"/></svg>
-                <span data-i18n="copyHtml">Copiar HTML</span>
-              </button>
-            </div>
-            <div class="inspect-code-container">
-              <pre><code class="inspect-code" id="inspect-code"></code></pre>
-            </div>
-          </div>
-        </div>
+    <!-- Ventana flotante tipo IDE al pasar el mouse sobre un elemento -->
+    <div class="inspect-float" id="inspect-float" hidden>
+      <div class="inspect-float-header">
+        <span class="inspect-tag-badge" id="inspect-badge">&lt;div&gt;</span>
+        <span class="inspect-dim-badge" id="inspect-dim">0×0</span>
+        <span class="inspect-copied-pill" id="inspect-copied-pill" data-i18n="inspectCopiedBadge" hidden>✓ ¡Copiado!</span>
       </div>
-    </aside>
+      <div class="inspect-float-selector" id="inspect-selector"></div>
+      <pre class="inspect-float-code"><code id="inspect-code"></code></pre>
+      <div class="inspect-float-footer">
+        <span class="inspect-float-hint" data-i18n="inspectFloatHint">Clic para copiar elemento · Esc para salir</span>
+      </div>
+    </div>
   </main>
 
   <footer class="ruler">
@@ -162,7 +125,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=4"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=4"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=5"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=5"></script>
 </body>
 </html>
