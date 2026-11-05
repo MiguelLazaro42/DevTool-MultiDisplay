@@ -630,6 +630,16 @@ body {
 .inspect-meta-selector {
   color: #38BDF8;
 }
+.inspect-meta-styles {
+  color: #86EFAC;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.inspect-float-row[hidden] {
+  display: none;
+}
 .inspect-float-element-label {
   padding: 5px 11px 0;
   font: 700 11px/1.2 ui-monospace, Menlo, Monaco, Consolas, monospace;
@@ -1168,9 +1178,173 @@ body.is-resizing-split iframe {
   cursor: pointer;
 }
 .traffic-chip:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.traffic-chip.is-active,
+.traffic-chip[aria-pressed="true"] {
+  background: rgba(34, 197, 94, 0.2);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.45);
+}
 .traffic-chip-accent {
   border-color: rgba(245, 158, 11, 0.4);
   color: #fbbf24;
+}
+.traffic-btn-ai {
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #fff;
+}
+.traffic-btn-ai:hover {
+  background: linear-gradient(135deg, #1d4ed8, #6d28d9);
+  color: #fff;
+}
+
+/* ---------- Botones de Reporte IA y Captura en la Barra Inferior + Modal IA ---------- */
+.bar-ai-group {
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #4f46e5;
+  border-radius: 7px;
+  background: #fff;
+}
+.btn-ai-report {
+  border: 0;
+  border-radius: 0;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  color: #fff;
+  font-weight: 700;
+  padding: 0 11px;
+  height: 100%;
+  cursor: pointer;
+}
+.btn-ai-report:hover {
+  background: linear-gradient(135deg, #1d4ed8, #6d28d9);
+  color: #fff;
+}
+.btn-ai-snapshot {
+  border: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 0;
+  background: #1e293b;
+  color: #e2e8f0;
+  font-weight: 600;
+  padding: 0 9px;
+  height: 100%;
+  cursor: pointer;
+}
+.btn-ai-snapshot:hover {
+  background: #0f172a;
+  color: #38bdf8;
+}
+
+.ai-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(11, 15, 19, 0.72);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+}
+.ai-modal-backdrop[hidden] {
+  display: none;
+}
+.ai-modal {
+  width: min(820px, 95vw);
+  max-height: 86vh;
+  background: #0F1419;
+  color: #F1F5F9;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ai-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: #161D24;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.ai-modal-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ai-modal-badge {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  color: #fff;
+  font: 700 11px/1 var(--font-ui);
+}
+.ai-modal-title {
+  margin: 0;
+  font: 700 14px/1.2 var(--font-ui);
+  color: #F8FAFC;
+}
+.ai-modal-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 16px;
+  background: #12181F;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.ai-toggle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font: 600 11.5px/1 var(--font-ui);
+  color: #E2E8F0;
+  cursor: pointer;
+  user-select: none;
+}
+.ai-toggle-chip:hover {
+  border-color: #38bdf8;
+}
+.ai-report-textarea {
+  flex: 1;
+  min-height: 290px;
+  margin: 12px 16px;
+  padding: 12px;
+  background: #0B0F13;
+  color: #E2E8F0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  resize: vertical;
+  outline: none;
+}
+.ai-report-textarea:focus {
+  border-color: #38bdf8;
+}
+.ai-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px 12px;
+  background: #161D24;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.ai-modal-hint {
+  font: 500 11.5px/1.3 var(--font-ui);
+  color: #94A3B8;
+}
+.ai-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .traffic-raw-wrap {

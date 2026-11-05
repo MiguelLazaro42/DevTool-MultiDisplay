@@ -355,10 +355,90 @@
     return lines.join("\n");
   }
 
+  function extractElementDiagnostics(el, rect) {
+    var r = rect || el.getBoundingClientRect();
+    var vw = document.documentElement.clientWidth || window.innerWidth || 0;
+    var vh = document.documentElement.clientHeight || window.innerHeight || 0;
+    var box = {
+      x: Math.round(r.left),
+      y: Math.round(r.top),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+      scrollWidth: el.scrollWidth || Math.round(r.width),
+      clientWidth: el.clientWidth || Math.round(r.width),
+      viewportW: vw,
+      viewportH: vh,
+      overflowRightPx: Math.max(0, Math.round(r.right - vw))
+    };
+    var stylesMap = {};
+    var summaryParts = [];
+    try {
+      var cs = window.getComputedStyle(el);
+      var keys = [
+        ["display", "display"],
+        ["position", "position"],
+        ["flexDirection", "flex-direction"],
+        ["justifyContent", "justify-content"],
+        ["alignItems", "align-items"],
+        ["flexWrap", "flex-wrap"],
+        ["gap", "gap"],
+        ["gridTemplateColumns", "grid-cols"],
+        ["width", "width"],
+        ["height", "height"],
+        ["maxWidth", "max-width"],
+        ["padding", "padding"],
+        ["margin", "margin"],
+        ["overflow", "overflow"],
+        ["overflowX", "overflow-x"],
+        ["zIndex", "z-index"],
+        ["fontSize", "font-size"],
+        ["fontWeight", "font-weight"],
+        ["color", "color"],
+        ["backgroundColor", "bg"]
+      ];
+      var ignoreDefaults = {
+        "position": "static",
+        "flex-direction": "row",
+        "justify-content": "normal",
+        "align-items": "normal",
+        "flex-wrap": "nowrap",
+        "gap": "normal",
+        "grid-cols": "none",
+        "max-width": "none",
+        "padding": "0px",
+        "margin": "0px",
+        "overflow": "visible",
+        "overflow-x": "visible",
+        "z-index": "auto",
+        "bg": "rgba(0, 0, 0, 0)"
+      };
+      for (var i = 0; i < keys.length; i++) {
+        var prop = keys[i][0];
+        var label = keys[i][1];
+        var val = cs[prop];
+        if (!val || val === ignoreDefaults[label]) continue;
+        if ((label === "gap" || label === "padding" || label === "margin") && (val === "0px" || val === "normal")) continue;
+        stylesMap[label] = val;
+        if (summaryParts.length < 7 && label !== "width" && label !== "height" && label !== "color") {
+          summaryParts.push(label + ": " + val);
+        }
+      }
+      if (box.overflowRightPx > 1) {
+        summaryParts.unshift("⚠ overflow-x: +" + box.overflowRightPx + "px");
+      }
+    } catch (_e) {}
+    return {
+      box: box,
+      stylesMap: stylesMap,
+      stylesSummary: summaryParts.join(" · ")
+    };
+  }
+
   function onInspectMove(e) {
     if (!inspectorActive) return;
     var target = e.target;
     if (!target || target === overlayEl || (overlayEl && overlayEl.contains(target))) return;
+    if (target.classList && target.classList.contains("__rv_audit_marker")) return;
     if (target === document.documentElement) return;
 
     ensureInspectorOverlay();
@@ -376,6 +456,8 @@
     var label = tag;
     if (target.id) label += "#" + target.id;
     else if (target.classList && target.classList.length) label += "." + target.classList[0];
+
+    var diag = extractElementDiagnostics(target, r);
 
     badgeEl.textContent = label + " | " + Math.round(r.width) + "×" + Math.round(r.height);
     if (r.top < 32) {
@@ -395,6 +477,9 @@
         foldedHtml: buildFoldedPreview(target),
         width: Math.round(r.width),
         height: Math.round(r.height),
+        box: diag.box,
+        stylesSummary: diag.stylesSummary,
+        stylesMap: diag.stylesMap,
         clientX: e.clientX,
         clientY: e.clientY
       }, ORIGIN);
@@ -434,6 +519,7 @@
     var tag = target.tagName.toLowerCase();
     var selector = getSelector(target);
     var html = target.outerHTML;
+    var diag = extractElementDiagnostics(target, r);
 
     try {
       parent.postMessage({
@@ -445,7 +531,10 @@
         selector: selector,
         html: html,
         width: Math.round(r.width),
-        height: Math.round(r.height)
+        height: Math.round(r.height),
+        box: diag.box,
+        stylesSummary: diag.stylesSummary,
+        stylesMap: diag.stylesMap
       }, ORIGIN);
     } catch (_e) {}
   }
@@ -525,19 +614,36 @@
     } catch (_e) {}
   }, { passive: true });
 
-  // 2. Emitir clics sincronizados
+  // 2. Emitir clics sincronizados y registrar en el Flujo de Usuario para IA
   window.addEventListener("click", function (e) {
-    if (!syncActive || inspectorActive || isReplayingSync || !e.isTrusted) return;
+    if (inspectorActive || isReplayingSync || !e.isTrusted) return;
     var target = e.target;
     if (!target || target === overlayEl || (overlayEl && overlayEl.contains(target))) return;
 
     var interactive = target.closest && target.closest("a, button, [role='button'], input, select, textarea, label, summary");
     var mainEl = interactive || target;
     var tag = mainEl.tagName ? mainEl.tagName.toLowerCase() : "";
-    var text = (mainEl.innerText || "").trim().slice(0, 80);
+    var text = (mainEl.innerText || mainEl.getAttribute("aria-label") || mainEl.getAttribute("title") || mainEl.value || "").replace(/\s+/g, " ").trim().slice(0, 80);
     var aEl = target.closest && target.closest("a[href]");
     var href = aEl ? aEl.getAttribute("href") : "";
     var absHref = aEl ? aEl.href : "";
+    var bestSel = interactive ? getSelector(interactive, false) : getSelector(target, false);
+
+    try {
+      parent.postMessage({
+        type: "rv:flow_event",
+        frame: F,
+        device: D,
+        action: "click",
+        selector: bestSel,
+        tag: tag,
+        label: text,
+        value: href || "",
+        url: getCurrentPageUrl()
+      }, ORIGIN);
+    } catch (_e) {}
+
+    if (!syncActive) return;
 
     try {
       parent.postMessage({
@@ -555,27 +661,54 @@
     } catch (_e) {}
   }, true);
 
-  // 3. Emitir escritura / cambios en inputs
+  // 3. Emitir escritura / cambios en inputs y registrar en el Flujo de Usuario
+  var flowInputTimers = new WeakMap();
   function onSyncInput(e) {
-    if (!syncActive || inspectorActive || isReplayingSync || !e.isTrusted) return;
+    if (inspectorActive || isReplayingSync || !e.isTrusted) return;
     var t = e.target;
     if (!t || !t.tagName) return;
     var tag = t.tagName.toLowerCase();
     if (tag !== "input" && tag !== "textarea" && tag !== "select") return;
+    var inputType = (t.type || "").toLowerCase();
+    var sel = getSelector(t, false);
+
+    // Debounce para el grabador de flujo (registra el valor consolidado que escribió el usuario)
+    if (e.type === "change" || e.type === "input") {
+      clearTimeout(flowInputTimers.get(t));
+      var timer = setTimeout(function () {
+        var displayVal = inputType === "password" ? "••••••••" : (inputType === "checkbox" || inputType === "radio" ? String(!!t.checked) : String(t.value || ""));
+        try {
+          parent.postMessage({
+            type: "rv:flow_event",
+            frame: F,
+            device: D,
+            action: "input",
+            selector: sel,
+            tag: tag,
+            label: t.placeholder || t.name || t.id || tag,
+            value: displayVal.slice(0, 200),
+            url: getCurrentPageUrl()
+          }, ORIGIN);
+        } catch (_e) {}
+      }, e.type === "change" ? 40 : 550);
+      flowInputTimers.set(t, timer);
+    }
+
+    if (!syncActive) return;
 
     try {
       parent.postMessage({
         type: "rv:sync_input",
         frame: F,
         eventType: e.type,
-        selector: getSelector(t, false),
+        selector: sel,
         structuralSelector: getSelector(t, true),
         id: t.id || "",
         name: t.name || "",
         tag: tag,
         value: t.value,
         checked: !!t.checked,
-        inputType: (t.type || "").toLowerCase()
+        inputType: inputType
       }, ORIGIN);
     } catch (_e) {}
   }
@@ -685,6 +818,379 @@
         } catch (_e) {}
         setTimeout(function () { isReplayingSync = false; }, 40);
       }
+    } else if (d.type === "rv:run_diagnostics") {
+      runVisualAudit(!!d.highlight);
+      reportStorageSnapshot();
+    } else if (d.type === "rv:set_audit_highlight") {
+      auditHighlightEnabled = !!d.active;
+      if (auditHighlightEnabled) {
+        runVisualAudit(true);
+      } else {
+        clearAuditMarkers();
+      }
+    } else if (d.type === "rv:focus_audit_element") {
+      focusAuditElement(d.selector);
+    } else if (d.type === "rv:request_dom_layout") {
+      sendDomLayoutSnapshot(d.requestId);
     }
+  });
+
+  // ---------- 4. Detector Automático de Problemas Visuales / Responsive ----------
+  var auditHighlightEnabled = false;
+  var auditMarkerEls = [];
+  var lastAuditIssues = [];
+
+  function clearAuditMarkers() {
+    while (auditMarkerEls.length) {
+      var m = auditMarkerEls.pop();
+      if (m && m.parentNode) m.parentNode.removeChild(m);
+    }
+  }
+
+  function renderAuditMarkers(issues) {
+    clearAuditMarkers();
+    if (!auditHighlightEnabled || !issues || !issues.length) return;
+    var sx = window.pageXOffset || document.documentElement.scrollLeft || 0;
+    var sy = window.pageYOffset || document.documentElement.scrollTop || 0;
+    issues.forEach(function (iss) {
+      if (!iss.box || !iss.box.width || !iss.box.height) return;
+      var marker = document.createElement("div");
+      marker.className = "__rv_audit_marker";
+      var isErr = iss.severity === "error";
+      var color = isErr ? "#EF4444" : "#F59E0B";
+      marker.style.cssText =
+        "position:absolute;pointer-events:none;z-index:2147483645;" +
+        "border:2px dashed " + color + ";background:" + (isErr ? "rgba(239,68,68,0.14)" : "rgba(245,158,11,0.14)") + ";" +
+        "box-sizing:border-box;border-radius:3px;" +
+        "top:" + (iss.box.y + sy) + "px;left:" + (iss.box.x + sx) + "px;" +
+        "width:" + iss.box.width + "px;height:" + iss.box.height + "px;";
+      var pill = document.createElement("span");
+      pill.style.cssText =
+        "position:absolute;top:-18px;left:0;background:" + color + ";color:#fff;" +
+        "font:700 9.5px/1.2 monospace;padding:2px 5px;border-radius:3px;white-space:nowrap;";
+      pill.textContent = iss.kind + " (" + iss.box.width + "×" + iss.box.height + ")";
+      marker.appendChild(pill);
+      (document.body || document.documentElement).appendChild(marker);
+      auditMarkerEls.push(marker);
+    });
+  }
+
+  function focusAuditElement(selector) {
+    if (!selector) return;
+    try {
+      var el = document.querySelector(selector);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+      setTimeout(function () {
+        showSyncPulse(el);
+        if (auditHighlightEnabled) runVisualAudit(true);
+      }, 260);
+    } catch (_e) {}
+  }
+
+  function hasOverflowHiddenAncestor(el) {
+    var cur = el.parentElement;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      try {
+        var cs = window.getComputedStyle(cur);
+        if (cs.overflowX === "hidden" || cs.overflowX === "clip" || cs.overflowX === "auto" || cs.overflowX === "scroll") {
+          return true;
+        }
+      } catch (_e) {}
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  function runVisualAudit(forceHighlight) {
+    if (forceHighlight !== undefined) auditHighlightEnabled = !!forceHighlight;
+    var issues = [];
+    var seenSelectors = {};
+    try {
+      var docEl = document.documentElement;
+      var vw = docEl.clientWidth || window.innerWidth || 0;
+      var vh = docEl.clientHeight || window.innerHeight || 0;
+      if (vw <= 0) return;
+
+      var all = document.body ? document.body.querySelectorAll("*") : [];
+      var maxNodes = Math.min(all.length, 900);
+
+      for (var i = 0; i < maxNodes; i++) {
+        var el = all[i];
+        if (!el || el === overlayEl || (el.classList && el.classList.contains("__rv_audit_marker"))) continue;
+        var tag = el.tagName.toLowerCase();
+        if (tag === "script" || tag === "style" || tag === "meta" || tag === "link" || tag === "noscript") continue;
+
+        var r = el.getBoundingClientRect();
+        if (r.width <= 0 && r.height <= 0 && tag !== "img") continue;
+
+        var cs = window.getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) continue;
+
+        var sel = getSelector(el, false);
+        var diag = null;
+
+        // 1. Imágenes rotas o deformadas
+        if (tag === "img") {
+          var src = el.getAttribute("src") || "";
+          if (!src || (el.complete && el.naturalWidth === 0)) {
+            diag = diag || extractElementDiagnostics(el, r);
+            issues.push({
+              kind: "IMG-ROTA",
+              severity: "error",
+              selector: sel,
+              tag: tag,
+              summary: "Imagen rota o sin cargar (" + (src ? src.slice(0, 50) : "sin src") + ")",
+              detail: "El elemento <img> no cargó correctamente (naturalWidth = 0). src=" + src,
+              box: diag.box,
+              styles: diag.stylesSummary,
+              html: (el.outerHTML || "").slice(0, 600)
+            });
+            continue;
+          } else if (el.complete && el.naturalWidth > 10 && el.naturalHeight > 10 && r.width > 24 && r.height > 24) {
+            var natRatio = el.naturalWidth / el.naturalHeight;
+            var curRatio = r.width / r.height;
+            var diffRatio = Math.abs(natRatio - curRatio) / natRatio;
+            if (diffRatio > 0.22 && cs.objectFit !== "cover" && cs.objectFit !== "contain" && cs.objectFit !== "scale-down") {
+              diag = diag || extractElementDiagnostics(el, r);
+              issues.push({
+                kind: "IMG-DEFORMADA",
+                severity: "warn",
+                selector: sel,
+                tag: tag,
+                summary: "Proporción de imagen estirada (" + Math.round(r.width) + "×" + Math.round(r.height) + "px vs original " + el.naturalWidth + "×" + el.naturalHeight + ")",
+                detail: "La imagen pierde su aspect-ratio original en este viewport. Sugerencia CSS: agregar object-fit: cover o height: auto.",
+                box: diag.box,
+                styles: diag.stylesSummary,
+                html: (el.outerHTML || "").slice(0, 600)
+              });
+            }
+          }
+        }
+
+        // 2. Desbordamiento horizontal fuera del viewport (causa scroll horizontal roto)
+        var overflowRight = Math.round(r.right - vw);
+        var overflowLeft = Math.round(-r.left);
+        if ((overflowRight > 3 || overflowLeft > 3) && !hasOverflowHiddenAncestor(el) && cs.position !== "fixed") {
+          // Evitar reportar al padre si un hijo directo también desborda igual
+          var childOverflowsSame = false;
+          if (el.children && el.children.length) {
+            for (var c = 0; c < el.children.length; c++) {
+              var cr = el.children[c].getBoundingClientRect();
+              if (Math.round(cr.right - vw) >= overflowRight - 2) {
+                childOverflowsSame = true;
+                break;
+              }
+            }
+          }
+          if (!childOverflowsSame && !seenSelectors["ov:" + sel]) {
+            seenSelectors["ov:" + sel] = true;
+            diag = diag || extractElementDiagnostics(el, r);
+            var sideMsg = overflowRight > 3
+              ? ("se sale +" + overflowRight + "px por la derecha del viewport (" + vw + "px)")
+              : ("se sale -" + overflowLeft + "px por la izquierda del viewport");
+            issues.push({
+              kind: "DESBORDE-X",
+              severity: "error",
+              selector: sel,
+              tag: tag,
+              summary: "<" + tag + "> (" + Math.round(r.width) + "×" + Math.round(r.height) + "px) " + sideMsg,
+              detail: "El elemento excede el ancho de la pantalla (" + vw + "px) provocando desbordamiento horizontal.",
+              box: diag.box,
+              styles: diag.stylesSummary,
+              html: (el.outerHTML || "").slice(0, 600)
+            });
+          }
+        }
+
+        // 3. Texto truncado / cortado sin ellipsis
+        if (el.children.length === 0 && (el.textContent || "").trim().length > 3) {
+          if (el.scrollWidth > el.clientWidth + 8 && (cs.overflowX === "hidden" || cs.overflowX === "clip") && cs.textOverflow !== "ellipsis") {
+            diag = diag || extractElementDiagnostics(el, r);
+            issues.push({
+              kind: "TEXTO-CORTADO",
+              severity: "warn",
+              selector: sel,
+              tag: tag,
+              summary: "Texto cortado horizontalmente (" + el.clientWidth + "px disponibles para " + el.scrollWidth + "px)",
+              detail: "Contenido de texto \"" + (el.textContent || "").trim().slice(0, 60) + "\" excede su contenedor con overflow:hidden sin text-overflow:ellipsis.",
+              box: diag.box,
+              styles: diag.stylesSummary,
+              html: (el.outerHTML || "").slice(0, 600)
+            });
+          }
+        }
+
+        // 4. Botones / enlaces demasiado pequeños en móvil (< 28x28px)
+        if (vw <= 500 && (tag === "button" || tag === "input" || (tag === "a" && el.getAttribute("href")))) {
+          if (r.width > 0 && r.height > 0 && (r.width < 26 || r.height < 26)) {
+            diag = diag || extractElementDiagnostics(el, r);
+            issues.push({
+              kind: "ÁREA-TÁCTIL",
+              severity: "warn",
+              selector: sel,
+              tag: tag,
+              summary: "Control interactivo muy pequeño en móvil (" + Math.round(r.width) + "×" + Math.round(r.height) + "px)",
+              detail: "En pantallas táctiles se recomienda al menos 32×32px (ideal 44×44px) para evitar errores al tocar.",
+              box: diag.box,
+              styles: diag.stylesSummary,
+              html: (el.outerHTML || "").slice(0, 600)
+            });
+          }
+        }
+
+        if (issues.length >= 35) break;
+      }
+    } catch (_e) {}
+
+    lastAuditIssues = issues;
+    if (auditHighlightEnabled) {
+      renderAuditMarkers(issues);
+    }
+
+    try {
+      parent.postMessage({
+        type: "rv:audit_results",
+        frame: F,
+        device: D,
+        url: getCurrentPageUrl(),
+        issues: issues
+      }, ORIGIN);
+    } catch (_e) {}
+  }
+
+  // ---------- 5. Inspector de Storage (localStorage, sessionStorage, document.cookie) ----------
+  function reportStorageSnapshot() {
+    var localItems = [];
+    var sessionItems = [];
+    var docCookies = [];
+    try {
+      if (window.localStorage) {
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf("rv.") !== 0) {
+            localItems.push({ key: k, value: localStorage.getItem(k) });
+          }
+        }
+      }
+    } catch (_e) {}
+    try {
+      if (window.sessionStorage) {
+        for (var j = 0; j < sessionStorage.length; j++) {
+          var sk = sessionStorage.key(j);
+          if (sk && sk.indexOf("rv.") !== 0) {
+            sessionItems.push({ key: sk, value: sessionStorage.getItem(sk) });
+          }
+        }
+      }
+    } catch (_e) {}
+    try {
+      if (document.cookie) {
+        document.cookie.split(";").forEach(function (pair) {
+          var eq = pair.indexOf("=");
+          if (eq > -1) {
+            docCookies.push({
+              key: pair.slice(0, eq).trim(),
+              value: pair.slice(eq + 1).trim()
+            });
+          }
+        });
+      }
+    } catch (_e) {}
+
+    try {
+      parent.postMessage({
+        type: "rv:storage_snapshot",
+        frame: F,
+        device: D,
+        url: getCurrentPageUrl(),
+        local: localItems,
+        session: sessionItems,
+        doc_cookies: docCookies
+      }, ORIGIN);
+    } catch (_e) {}
+  }
+
+  // ---------- 6. Captura de Geometría DOM para Snapshot Visual Anotado ----------
+  function sendDomLayoutSnapshot(requestId) {
+    var nodes = [];
+    var bgPage = "#ffffff";
+    try {
+      var bodyCs = window.getComputedStyle(document.body || document.documentElement);
+      if (bodyCs.backgroundColor && bodyCs.backgroundColor !== "rgba(0, 0, 0, 0)") {
+        bgPage = bodyCs.backgroundColor;
+      } else {
+        var htmlCs = window.getComputedStyle(document.documentElement);
+        if (htmlCs.backgroundColor && htmlCs.backgroundColor !== "rgba(0, 0, 0, 0)") {
+          bgPage = htmlCs.backgroundColor;
+        }
+      }
+      var vw = document.documentElement.clientWidth || window.innerWidth || 0;
+      var vh = document.documentElement.clientHeight || window.innerHeight || 0;
+      var all = document.body ? document.body.querySelectorAll("*") : [];
+      var limit = Math.min(all.length, 320);
+
+      for (var i = 0; i < limit; i++) {
+        var el = all[i];
+        if (!el || el === overlayEl || (el.classList && el.classList.contains("__rv_audit_marker"))) continue;
+        var r = el.getBoundingClientRect();
+        if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw + 120) continue;
+        if (r.width < 2 || r.height < 2) continue;
+        var cs = window.getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) continue;
+
+        var bg = cs.backgroundColor !== "rgba(0, 0, 0, 0)" ? cs.backgroundColor : "";
+        var bCol = (parseFloat(cs.borderTopWidth) > 0 && cs.borderTopColor !== "rgba(0, 0, 0, 0)") ? cs.borderTopColor : "";
+        var radius = parseFloat(cs.borderTopLeftRadius) || 0;
+        var directText = "";
+        for (var c = 0; c < el.childNodes.length; c++) {
+          if (el.childNodes[c].nodeType === 3) {
+            directText += el.childNodes[c].nodeValue;
+          }
+        }
+        directText = directText.replace(/\s+/g, " ").trim().slice(0, 65);
+        var tag = el.tagName.toLowerCase();
+        if (tag === "input" || tag === "textarea" || tag === "button") {
+          directText = directText || (el.value || el.placeholder || "").slice(0, 50);
+        }
+
+        if (bg || bCol || directText || tag === "img" || tag === "button" || tag === "input") {
+          nodes.push({
+            tag: tag,
+            x: Math.round(r.left),
+            y: Math.round(r.top),
+            w: Math.round(r.width),
+            h: Math.round(r.height),
+            bg: bg,
+            border: bCol,
+            radius: Math.min(24, Math.round(radius)),
+            text: directText,
+            color: cs.color || "#111827",
+            fontSize: Math.min(28, Math.max(9, parseFloat(cs.fontSize) || 13)),
+            fontWeight: cs.fontWeight || "400"
+          });
+        }
+      }
+    } catch (_e) {}
+
+    try {
+      parent.postMessage({
+        type: "rv:dom_layout_snapshot",
+        requestId: requestId,
+        frame: F,
+        device: D,
+        url: getCurrentPageUrl(),
+        bgPage: bgPage,
+        nodes: nodes,
+        auditIssues: lastAuditIssues
+      }, ORIGIN);
+    } catch (_e) {}
+  }
+
+  window.addEventListener("load", function () {
+    setTimeout(function () {
+      runVisualAudit();
+      reportStorageSnapshot();
+    }, 500);
   });
 })();

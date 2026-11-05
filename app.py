@@ -52,6 +52,23 @@ _console_log = collections.deque(maxlen=400)
 _console_seq = 0
 _console_lock = threading.Lock()
 
+# Historial de pasos / flujo de usuario (Clicks, Inputs, Navegación) para reproducir bugs con IA.
+_flow_log = collections.deque(maxlen=250)
+_flow_seq = 0
+_flow_lock = threading.Lock()
+
+# Resultados de auditoría visual / responsive por dispositivo.
+_audit_by_device = {}
+_audit_lock = threading.Lock()
+
+# Estado de localStorage / sessionStorage / document.cookie reportado por cada dispositivo.
+_client_storage_by_device = {}
+_storage_lock = threading.Lock()
+
+# Último elemento inspeccionado/copiado (compartido entre monitores).
+_last_inspected = {}
+_inspected_lock = threading.Lock()
+
 
 def _format_body_preview(raw_bytes, content_type, max_chars=12000):
     if not raw_bytes:
@@ -386,6 +403,217 @@ def api_console_clear():
     with _console_lock:
         _console_log.clear()
     return jsonify({"ok": True})
+
+
+@app.route("/api/flow", methods=["GET", "POST"])
+def api_flow():
+    global _flow_seq
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        dev_id = payload.get("device") or payload.get("frame") or "unknown"
+        device = DEVICES_BY_ID.get(dev_id, {"id": dev_id, "name": dev_id})
+        with _flow_lock:
+            _flow_seq += 1
+            entry = {
+                "id": _flow_seq,
+                "time": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "action": (payload.get("action") or "click").lower(),
+                "selector": (payload.get("selector") or "")[:600],
+                "tag": (payload.get("tag") or "")[:80],
+                "label": (payload.get("label") or payload.get("text") or "")[:600],
+                "value": (payload.get("value") or "")[:1000],
+                "url": (payload.get("url") or "")[:1000],
+            }
+            _flow_log.append(entry)
+        return jsonify({"ok": True, "item": entry})
+
+    since = request.args.get("since", 0, type=int)
+    with _flow_lock:
+        items = [e for e in _flow_log if e["id"] > since]
+    return jsonify({"items": items})
+
+
+@app.route("/api/flow/clear", methods=["POST"])
+def api_flow_clear():
+    with _flow_lock:
+        _flow_log.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/audit", methods=["GET", "POST"])
+def api_audit():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        dev_id = payload.get("device") or payload.get("frame") or "unknown"
+        device = DEVICES_BY_ID.get(dev_id, {"id": dev_id, "name": dev_id, "width": 0, "height": 0})
+        issues = payload.get("issues") or []
+        cleaned = []
+        for idx, iss in enumerate(issues[:80]):
+            cleaned.append({
+                "id": f"{dev_id}:{idx + 1}",
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "viewport": f"{device.get('width', 0)}×{device.get('height', 0)}",
+                "kind": (iss.get("kind") or "LAYOUT")[:60],
+                "severity": (iss.get("severity") or "warn")[:20],
+                "selector": (iss.get("selector") or "")[:500],
+                "tag": (iss.get("tag") or "")[:80],
+                "summary": (iss.get("summary") or "")[:600],
+                "detail": (iss.get("detail") or "")[:4000],
+                "box": iss.get("box") or {},
+                "styles": iss.get("styles") or "",
+                "html": (iss.get("html") or "")[:2500],
+                "url": (payload.get("url") or "")[:1000],
+            })
+        with _audit_lock:
+            _audit_by_device[dev_id] = cleaned
+        return jsonify({"ok": True, "count": len(cleaned)})
+
+    with _audit_lock:
+        all_issues = []
+        for dev_list in _audit_by_device.values():
+            all_issues.extend(dev_list)
+    return jsonify({"items": all_issues})
+
+
+@app.route("/api/audit/clear", methods=["POST"])
+def api_audit_clear():
+    with _audit_lock:
+        _audit_by_device.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/storage", methods=["GET", "POST"])
+def api_storage():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        dev_id = payload.get("device") or payload.get("frame") or "unknown"
+        with _storage_lock:
+            _client_storage_by_device[dev_id] = {
+                "url": (payload.get("url") or "")[:1000],
+                "local": payload.get("local") or [],
+                "session": payload.get("session") or [],
+                "doc_cookies": payload.get("doc_cookies") or [],
+                "updated_at": datetime.datetime.now().strftime("%H:%M:%S"),
+            }
+        return jsonify({"ok": True})
+
+    items = []
+    seq = 0
+    # 1. Cookies del jar del servidor por cada sesión (incluye HttpOnly)
+    with _sessions_lock:
+        session_snapshot = list(_sessions.items())
+    for frame_id, sess in session_snapshot:
+        device = DEVICES_BY_ID.get(frame_id, {"id": frame_id, "name": frame_id})
+        try:
+            for c in sess.cookies:
+                seq += 1
+                http_only = bool(getattr(c, "_rest", {}).get("HttpOnly") or "HttpOnly" in getattr(c, "_rest", {}))
+                items.append({
+                    "id": seq,
+                    "device_id": device["id"],
+                    "device_name": device["name"],
+                    "store": "HttpOnly Cookie" if http_only else "Cookie",
+                    "key": c.name,
+                    "value": c.value or "",
+                    "domain": c.domain or "",
+                    "path": c.path or "/",
+                    "secure": bool(c.secure),
+                    "http_only": http_only,
+                    "expires": c.expires,
+                })
+        except Exception:
+            pass
+
+    # 2. localStorage y sessionStorage reportados por los iframes
+    with _storage_lock:
+        client_snapshot = dict(_client_storage_by_device)
+    for dev_id, st in client_snapshot.items():
+        device = DEVICES_BY_ID.get(dev_id, {"id": dev_id, "name": dev_id})
+        for entry in st.get("local", []):
+            seq += 1
+            items.append({
+                "id": seq,
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "store": "localStorage",
+                "key": str(entry.get("key", ""))[:300],
+                "value": str(entry.get("value", ""))[:8000],
+                "domain": st.get("url", ""),
+                "path": "",
+                "secure": False,
+                "http_only": False,
+                "expires": None,
+            })
+        for entry in st.get("session", []):
+            seq += 1
+            items.append({
+                "id": seq,
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "store": "sessionStorage",
+                "key": str(entry.get("key", ""))[:300],
+                "value": str(entry.get("value", ""))[:8000],
+                "domain": st.get("url", ""),
+                "path": "",
+                "secure": False,
+                "http_only": False,
+                "expires": None,
+            })
+        for entry in st.get("doc_cookies", []):
+            ck_name = str(entry.get("key", ""))[:300]
+            if not ck_name:
+                continue
+            if any(x["device_id"] == device["id"] and x["key"] == ck_name and "Cookie" in x["store"] for x in items):
+                continue
+            seq += 1
+            items.append({
+                "id": seq,
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "store": "Cookie (JS)",
+                "key": ck_name,
+                "value": str(entry.get("value", ""))[:8000],
+                "domain": st.get("url", ""),
+                "path": "/",
+                "secure": False,
+                "http_only": False,
+                "expires": None,
+            })
+
+    return jsonify({"items": items})
+
+
+@app.route("/api/inspected", methods=["GET", "POST"])
+def api_inspected():
+    global _last_inspected
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        dev_id = payload.get("device") or payload.get("frame") or "unknown"
+        device = DEVICES_BY_ID.get(dev_id, {"id": dev_id, "name": dev_id, "width": 0, "height": 0})
+        with _inspected_lock:
+            _last_inspected = {
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "viewport": f"{device.get('width', 0)}×{device.get('height', 0)}",
+                "url": payload.get("url") or "",
+                "tag": payload.get("tag") or "",
+                "selector": payload.get("selector") or "",
+                "width": payload.get("width") or 0,
+                "height": payload.get("height") or 0,
+                "box": payload.get("box") or {},
+                "stylesSummary": payload.get("stylesSummary") or "",
+                "stylesMap": payload.get("stylesMap") or {},
+                "html": (payload.get("html") or "")[:12000],
+            }
+        return jsonify({"ok": True, "item": _last_inspected})
+
+    with _inspected_lock:
+        data = dict(_last_inspected) if _last_inspected else None
+    return jsonify({"item": data})
 
 
 def find_free_port(preferred, attempts=20):

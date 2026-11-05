@@ -64,21 +64,37 @@
   var inspectCopiedPill = document.getElementById("inspect-copied-pill");
   var inspectBadge = document.getElementById("inspect-badge");
   var inspectDim = document.getElementById("inspect-dim");
+  var inspectDevice = document.getElementById("inspect-device");
   var inspectLink = document.getElementById("inspect-link");
   var inspectSelector = document.getElementById("inspect-selector");
+  var inspectStyles = document.getElementById("inspect-styles");
+  var inspectStylesRow = document.getElementById("inspect-styles-row");
   var inspectCode = document.getElementById("inspect-code");
   var inspectClose = document.getElementById("inspect-close");
   var copiedPillTimer = null;
 
-  // Elementos del Panel de Tráfico HTTP y Consola (estilo Burp Suite + DevTools)
+  // Elementos del Panel de Tráfico HTTP, Consola, Auditoría, Flujo y Storage
   var trafficBtn = document.getElementById("traffic-btn");
   var trafficCountEl = document.getElementById("traffic-count");
   var consoleBtn = document.getElementById("console-btn");
   var consoleCountEl = document.getElementById("console-count");
+  var auditBtn = document.getElementById("audit-btn");
+  var auditCountEl = document.getElementById("audit-count");
+  var flowBtn = document.getElementById("flow-btn");
+  var flowCountEl = document.getElementById("flow-count");
+  var aiReportBtn = document.getElementById("ai-report-btn");
+  var snapshotBtn = document.getElementById("snapshot-btn");
+  var panelAiReportBtn = document.getElementById("panel-ai-report-btn");
+  var panelSnapshotBtn = document.getElementById("panel-snapshot-btn");
+
   var trafficPanel = document.getElementById("traffic-panel");
   var trafficDot = document.getElementById("traffic-dot");
   var panelModeTraffic = document.getElementById("panel-mode-traffic");
   var panelModeConsole = document.getElementById("panel-mode-console");
+  var panelModeAudit = document.getElementById("panel-mode-audit");
+  var panelModeFlow = document.getElementById("panel-mode-flow");
+  var panelModeStorage = document.getElementById("panel-mode-storage");
+
   var trafficSearch = document.getElementById("traffic-search");
   var trafficMethodPills = document.getElementById("traffic-method-pills");
   var consoleLevelPills = document.getElementById("console-level-pills");
@@ -103,6 +119,43 @@
   var consoleRawCode = document.getElementById("console-raw-code");
   var consoleCopyBtn = document.getElementById("console-copy-btn");
 
+  // Auditoría Visual
+  var auditSplitView = document.getElementById("audit-split-view");
+  var auditTbody = document.getElementById("audit-tbody");
+  var auditEmpty = document.getElementById("audit-empty");
+  var auditRawCode = document.getElementById("audit-raw-code");
+  var auditScanBtn = document.getElementById("audit-scan-btn");
+  var auditHighlightBtn = document.getElementById("audit-highlight-btn");
+  var auditCopyOneBtn = document.getElementById("audit-copy-one-btn");
+  var auditCopyAllBtn = document.getElementById("audit-copy-all-btn");
+
+  // Flujo de Usuario / Pasos
+  var flowSplitView = document.getElementById("flow-split-view");
+  var flowTbody = document.getElementById("flow-tbody");
+  var flowEmpty = document.getElementById("flow-empty");
+  var flowRawCode = document.getElementById("flow-raw-code");
+  var flowTabMd = document.getElementById("flow-tab-md");
+  var flowTabPw = document.getElementById("flow-tab-pw");
+  var flowRecordToggle = document.getElementById("flow-record-toggle");
+  var flowCopyBtn = document.getElementById("flow-copy-btn");
+
+  // Storage / Cookies / JWT
+  var storageSplitView = document.getElementById("storage-split-view");
+  var storageTbody = document.getElementById("storage-tbody");
+  var storageEmpty = document.getElementById("storage-empty");
+  var storageRawCode = document.getElementById("storage-raw-code");
+  var storageRefreshBtn = document.getElementById("storage-refresh-btn");
+  var storageCopyOneBtn = document.getElementById("storage-copy-one-btn");
+  var storageCopyAllBtn = document.getElementById("storage-copy-all-btn");
+
+  // Modal de Reporte IA
+  var aiReportModal = document.getElementById("ai-report-modal");
+  var aiReportTextarea = document.getElementById("ai-report-textarea");
+  var aiModalToggles = document.getElementById("ai-modal-toggles");
+  var aiModalClose = document.getElementById("ai-modal-close");
+  var aiModalCopyBtn = document.getElementById("ai-modal-copy-btn");
+  var aiModalSnapshotBtn = document.getElementById("ai-modal-snapshot-btn");
+
   var trafficState = {
     open: false,
     panelMode: "traffic",
@@ -124,6 +177,30 @@
     userPinned: false,
     levelFilter: "all"
   };
+
+  var auditState = {
+    items: [],
+    selectedIdx: -1,
+    highlightOnScreens: false
+  };
+
+  var flowState = {
+    lastSeq: 0,
+    items: [],
+    selectedId: null,
+    recording: true,
+    format: "markdown" // "markdown" | "playwright"
+  };
+
+  var storageState = {
+    serverCookies: [],
+    byDevice: {},
+    rows: [],
+    selectedIdx: -1
+  };
+
+  var lastInspectedElement = null;
+  var pendingDomSnapshots = {};
 
   // Canal de sincronización entre múltiples pestañas / monitores (BroadcastChannel)
   var TAB_ID = "tab_" + Math.random().toString(36).slice(2, 9);
@@ -244,6 +321,9 @@
         iframe.contentWindow.postMessage({ type: "rv:set_sync", active: state.sync }, location.origin);
         if (state.inspector) {
           iframe.contentWindow.postMessage({ type: "rv:set_inspector", active: true }, location.origin);
+        }
+        if (auditState.highlightOnScreens) {
+          iframe.contentWindow.postMessage({ type: "rv:set_audit_highlight", active: true }, location.origin);
         }
       } catch (_e) {}
     });
@@ -945,9 +1025,29 @@
     if (ev.origin !== location.origin || !ev.data) return;
     var d = ev.data;
     if (d.type === "rv:navigated") {
+      var prevUrl = state.frameUrls[d.frame];
       if (els[d.frame]) state.frameUrls[d.frame] = d.url;
       fetchTraffic();
       postCrossTab({ type: "bc:traffic_ping" });
+      if (flowState.recording && d.url && d.url !== prevUrl) {
+        fetch("/api/flow", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            frame: d.frame,
+            action: "navigate",
+            selector: "window",
+            tag: "document",
+            text: d.url,
+            value: d.url,
+            url: d.url
+          })
+        }).then(function () {
+          fetchFlow();
+          postCrossTab({ type: "bc:flow_ping" });
+        }).catch(function () {});
+      }
     } else if (d.type === "rv:traffic_ping") {
       fetchTraffic();
       postCrossTab({ type: "bc:traffic_ping" });
@@ -961,6 +1061,42 @@
         fetchConsole();
         postCrossTab({ type: "bc:console_ping" });
       }).catch(function () {});
+    } else if (d.type === "rv:flow_event") {
+      if (!flowState.recording) return;
+      fetch("/api/flow", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(d)
+      }).then(function () {
+        fetchFlow();
+        postCrossTab({ type: "bc:flow_ping" });
+      }).catch(function () {});
+    } else if (d.type === "rv:audit_results") {
+      fetch("/api/audit", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(d)
+      }).then(function () {
+        fetchAudit();
+        postCrossTab({ type: "bc:audit_ping" });
+      }).catch(function () {});
+    } else if (d.type === "rv:storage_snapshot") {
+      fetch("/api/storage", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(d)
+      }).then(function () {
+        fetchStorage();
+        postCrossTab({ type: "bc:storage_ping" });
+      }).catch(function () {});
+    } else if (d.type === "rv:dom_layout_snapshot") {
+      if (d.frame && pendingDomSnapshots[d.frame]) {
+        pendingDomSnapshots[d.frame](d);
+        delete pendingDomSnapshots[d.frame];
+      }
     } else if (d.type === "rv:element_hover") {
       showInspectorHover(d);
     } else if (d.type === "rv:element_leave") {
@@ -1028,6 +1164,22 @@
         fetchConsole();
         return;
       }
+      if (msg.type === "bc:audit_ping") {
+        fetchAudit();
+        return;
+      }
+      if (msg.type === "bc:flow_ping") {
+        fetchFlow();
+        return;
+      }
+      if (msg.type === "bc:storage_ping") {
+        fetchStorage();
+        return;
+      }
+      if (msg.type === "bc:inspected_ping" && msg.item) {
+        lastInspectedElement = msg.item;
+        return;
+      }
       if (msg.type === "bc:traffic_clear") {
         trafficState.items = [];
         trafficState.selectedId = null;
@@ -1042,6 +1194,22 @@
         updateConsoleBadge();
         renderConsoleTable();
         renderConsoleDetail();
+        return;
+      }
+      if (msg.type === "bc:audit_clear") {
+        auditState.items = [];
+        auditState.selectedIdx = -1;
+        updateAuditBadge();
+        renderAuditTable();
+        renderAuditDetail();
+        return;
+      }
+      if (msg.type === "bc:flow_clear") {
+        flowState.items = [];
+        flowState.selectedId = null;
+        if (flowCountEl) flowCountEl.textContent = "0";
+        renderFlowTable();
+        renderFlowDetail();
         return;
       }
 
@@ -1173,11 +1341,19 @@
     var item = els[data.frame];
     if (!item || !item.iframe) return;
 
+    var dObj = BY_ID[data.frame];
+    var devText = dObj ? (dObj.name + " (" + dObj.width + "×" + dObj.height + ")") : (data.frame || "");
     var endpoint = data.url || state.frameUrls[data.frame] || state.url || "";
     if (inspectBadge) inspectBadge.textContent = "<" + (data.tag || "element") + ">";
     if (inspectDim) inspectDim.textContent = (data.width && data.height) ? (data.width + "×" + data.height + " px") : "";
+    if (inspectDevice) {
+      inspectDevice.textContent = devText;
+      inspectDevice.style.color = deviceColor(data.frame);
+    }
     if (inspectLink) inspectLink.textContent = endpoint;
     if (inspectSelector) inspectSelector.textContent = data.selector || "";
+    if (inspectStyles) inspectStyles.textContent = data.stylesSummary || "";
+    if (inspectStylesRow) inspectStylesRow.hidden = !data.stylesSummary;
     if (inspectCode) inspectCode.textContent = data.foldedHtml || "";
 
     inspectFloat.hidden = false;
@@ -1188,8 +1364,8 @@
     var px = ir.left + (data.clientX || 0) * devScale;
     var py = ir.top + (data.clientY || 0) * devScale;
 
-    var fw = inspectFloat.offsetWidth || 320;
-    var fh = inspectFloat.offsetHeight || 160;
+    var fw = inspectFloat.offsetWidth || 340;
+    var fh = inspectFloat.offsetHeight || 180;
     var margin = 16;
 
     var x = px + 18;
@@ -1203,11 +1379,62 @@
     inspectFloat.style.transform = "translate3d(" + Math.round(x) + "px," + Math.round(y) + "px,0)";
   }
 
+  function formatBoxString(box) {
+    if (!box) return "";
+    if (typeof box === "string") return box;
+    if (typeof box === "object" && box.width !== undefined) {
+      var s = box.width + "×" + box.height + "px (x:" + (box.x || 0) + ", y:" + (box.y || 0);
+      if (box.scrollWidth && box.scrollWidth > box.width + 2) s += ", scrollW:" + box.scrollWidth + "px";
+      if (box.viewportW) s += ", viewport:" + box.viewportW + "×" + box.viewportH + "px";
+      if (box.overflowRightPx > 0) s += ", overflowRight:+" + box.overflowRightPx + "px";
+      return s + ")";
+    }
+    return "";
+  }
+
+  function formatInspectedClipboardText(item) {
+    if (!item) return "";
+    var boxStr = formatBoxString(item.box);
+    var lines = [
+      "link: " + (item.url || state.url || ""),
+      "device: " + (item.device_name || item.frame || "—")
+    ];
+    if (item.selector) lines.push("selector: " + item.selector);
+    if (boxStr) lines.push("box: " + boxStr);
+    if (item.stylesSummary) lines.push("styles: " + item.stylesSummary);
+    lines.push("element: " + (item.html || ""));
+    return lines.join("\n");
+  }
+
   function onInspectorPicked(data) {
     if (!state.inspector) return;
+    var dObj = BY_ID[data.frame];
+    var devLabel = dObj ? (dObj.name + " (" + dObj.width + "×" + dObj.height + ")") : (data.frame || "");
     var endpoint = data.url || state.frameUrls[data.frame] || state.url || "";
-    var payload = "link: " + endpoint + "\nelement: " + (data.html || "");
-    // Al dar clic se copia el endpoint (link:) y el elemento completo (element:) al portapapeles sin salir del modo inspección
+    lastInspectedElement = {
+      frame: data.frame,
+      device_name: devLabel,
+      url: endpoint,
+      tag: data.tag || "element",
+      selector: data.selector || "",
+      width: data.width || 0,
+      height: data.height || 0,
+      box: data.box || "",
+      stylesSummary: data.stylesSummary || "",
+      stylesMap: data.stylesMap || {},
+      html: data.html || ""
+    };
+
+    fetch("/api/inspected", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(lastInspectedElement)
+    }).catch(function () {});
+    postCrossTab({ type: "bc:inspected_ping", item: lastInspectedElement });
+
+    var payload = formatInspectedClipboardText(lastInspectedElement);
+    // Al dar clic se copia link:, device:, selector:, box:, styles: y element: al portapapeles sin salir del modo inspección
     copyText(payload, t("copiedHtml"));
 
     if (inspectFloat) {
@@ -1583,33 +1810,623 @@
       });
   }
 
-  function setPanelMode(mode) {
-    trafficState.panelMode = mode === "console" ? "console" : "traffic";
-    var isConsole = trafficState.panelMode === "console";
+  // ---------- Auditoría Visual Automática (Overflow-X, Imágenes rotas/deformadas, Texto cortado, Área táctil) ----------
+  function updateAuditBadge() {
+    if (!auditCountEl) return;
+    auditCountEl.textContent = String(auditState.items.length);
+    var hasErr = auditState.items.some(function (it) { return it.severity === "error"; });
+    auditCountEl.classList.toggle("has-error", hasErr);
+  }
 
-    if (panelModeTraffic) panelModeTraffic.classList.toggle("is-active", !isConsole);
-    if (panelModeConsole) panelModeConsole.classList.toggle("is-active", isConsole);
-    if (trafficMethodPills) trafficMethodPills.hidden = isConsole;
-    if (consoleLevelPills) consoleLevelPills.hidden = !isConsole;
-    if (trafficSplitView) trafficSplitView.hidden = isConsole;
-    if (consoleSplitView) consoleSplitView.hidden = !isConsole;
+  function matchesAuditFilter(item) {
+    if (trafficState.deviceFilter !== "all" && item.device_id !== trafficState.deviceFilter) {
+      return false;
+    }
+    if (trafficState.searchQuery) {
+      var q = trafficState.searchQuery.toLowerCase();
+      var hay = ((item.kind || "") + " " + (item.selector || "") + " " + (item.summary || "") + " " + (item.device_name || "")).toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    return true;
+  }
+
+  function formatAuditIssueForAi(item) {
+    if (!item) return "";
+    var boxStr = formatBoxString(item.box);
+    var stylesStr = item.stylesSummary || item.styles || "";
+    var lines = [
+      "### [" + (item.kind || "VISUAL") + "] en " + (item.device_name || item.device_id) + " (" + (item.viewport || "") + ")",
+      "- **URL:** " + (item.url || state.url || "—"),
+      "- **Severidad:** " + (item.severity || "warn").toUpperCase(),
+      "- **Selector CSS:** `" + (item.selector || "") + "`",
+      "- **Problema detectado:** " + (item.summary || ""),
+      "- **Detalle técnico:** " + (item.detail || "")
+    ];
+    if (boxStr) lines.push("- **Layout Box:** `" + boxStr + "`");
+    if (stylesStr) lines.push("- **Computed Styles:** `" + stylesStr + "`");
+    if (item.html) {
+      lines.push("- **HTML del elemento:**", "```html", item.html, "```");
+    }
+    return lines.join("\n");
+  }
+
+  function formatAllAuditIssuesForAi() {
+    var filtered = auditState.items.filter(matchesAuditFilter);
+    if (!filtered.length) return "Sin problemas visuales detectados.";
+    var header = "## Diagnóstico de Auditoría Visual y Responsiva (" + filtered.length + " hallazgos)\n\n";
+    return header + filtered.map(formatAuditIssueForAi).join("\n\n");
+  }
+
+  function renderAuditDetail() {
+    if (!auditRawCode) return;
+    var filtered = auditState.items.filter(matchesAuditFilter);
+    var selected = (auditState.selectedIdx >= 0 && auditState.selectedIdx < filtered.length)
+      ? filtered[auditState.selectedIdx]
+      : (filtered.length ? filtered[0] : null);
+    if (!selected) {
+      auditRawCode.textContent = t("auditSelectHint");
+      return;
+    }
+    auditRawCode.textContent = formatAuditIssueForAi(selected);
+  }
+
+  function renderAuditTable() {
+    if (!auditTbody) return;
+    var filtered = auditState.items.filter(matchesAuditFilter);
+    auditTbody.innerHTML = "";
+    if (auditEmpty) auditEmpty.hidden = filtered.length > 0;
+
+    if (auditState.selectedIdx >= filtered.length) {
+      auditState.selectedIdx = filtered.length ? 0 : -1;
+    }
+
+    filtered.forEach(function (item, idx) {
+      var tr = document.createElement("tr");
+      if (idx === auditState.selectedIdx) tr.className = "is-selected";
+      tr.style.setProperty("--dev-color", deviceColor(item.device_id));
+
+      var tdId = document.createElement("td");
+      tdId.className = "col-id";
+      tdId.textContent = "#" + (idx + 1);
+
+      var tdKind = document.createElement("td");
+      tdKind.className = "col-level";
+      var kBadge = document.createElement("span");
+      kBadge.className = "level-badge " + (item.severity === "error" ? "level-error" : "level-warn");
+      kBadge.textContent = item.kind || "VISUAL";
+      tdKind.appendChild(kBadge);
+
+      var tdDevice = document.createElement("td");
+      tdDevice.className = "col-device";
+      tdDevice.appendChild(buildDeviceChip(item.device_id, item.device_name));
+
+      var tdSel = document.createElement("td");
+      tdSel.className = "col-host";
+      tdSel.textContent = item.selector || "—";
+      tdSel.title = item.selector || "";
+
+      var tdDesc = document.createElement("td");
+      tdDesc.className = "col-cmsg";
+      tdDesc.textContent = (item.summary || "") + (item.detail ? " — " + item.detail : "");
+      tdDesc.title = (item.summary || "") + "\n" + (item.detail || "");
+
+      tr.appendChild(tdId);
+      tr.appendChild(tdKind);
+      tr.appendChild(tdDevice);
+      tr.appendChild(tdSel);
+      tr.appendChild(tdDesc);
+
+      tr.addEventListener("click", function () {
+        auditState.selectedIdx = idx;
+        renderAuditTable();
+        renderAuditDetail();
+        // Hacer scroll y resaltar el elemento problemático dentro de ese dispositivo
+        var devEntry = els[item.device_id];
+        if (devEntry && devEntry.iframe && devEntry.iframe.contentWindow && item.selector) {
+          try {
+            devEntry.iframe.contentWindow.postMessage({
+              type: "rv:focus_audit_element",
+              selector: item.selector
+            }, location.origin);
+          } catch (_e) {}
+        }
+      });
+
+      auditTbody.appendChild(tr);
+    });
+  }
+
+  var isFetchingAudit = false;
+  function fetchAudit() {
+    if (isFetchingAudit) return;
+    isFetchingAudit = true;
+    fetch("/api/audit", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !Array.isArray(data.items)) return;
+        auditState.items = data.items;
+        if (auditState.selectedIdx === -1 && auditState.items.length) {
+          auditState.selectedIdx = 0;
+        }
+        updateAuditBadge();
+        if (trafficState.open && trafficState.panelMode === "audit") {
+          renderAuditTable();
+          renderAuditDetail();
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        isFetchingAudit = false;
+      });
+  }
+
+  function triggerAuditScan() {
+    state.active.forEach(function (id) {
+      var item = els[id];
+      if (item && item.iframe && !item.iframe.hidden && item.iframe.contentWindow) {
+        try {
+          item.iframe.contentWindow.postMessage({ type: "rv:run_audit" }, location.origin);
+        } catch (_e) {}
+      }
+    });
+  }
+
+  function toggleAuditHighlight(on) {
+    if (on === undefined) on = !auditState.highlightOnScreens;
+    auditState.highlightOnScreens = !!on;
+    if (auditHighlightBtn) {
+      auditHighlightBtn.setAttribute("aria-pressed", auditState.highlightOnScreens ? "true" : "false");
+      auditHighlightBtn.classList.toggle("is-active", auditState.highlightOnScreens);
+    }
+    state.active.forEach(function (id) {
+      var item = els[id];
+      if (item && item.iframe && item.iframe.contentWindow) {
+        try {
+          item.iframe.contentWindow.postMessage({
+            type: "rv:set_audit_highlight",
+            active: auditState.highlightOnScreens
+          }, location.origin);
+        } catch (_e) {}
+      }
+    });
+  }
+
+  // ---------- Grabadora de Flujo de Usuario (Pasos Markdown + Playwright) ----------
+  function matchesFlowFilter(item) {
+    if (trafficState.deviceFilter !== "all" && item.device_id !== trafficState.deviceFilter) {
+      return false;
+    }
+    if (trafficState.searchQuery) {
+      var q = trafficState.searchQuery.toLowerCase();
+      var hay = ((item.action || "") + " " + (item.selector || "") + " " + (item.label || item.text || "") + " " + (item.value || "") + " " + (item.device_name || "")).toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    return true;
+  }
+
+  function buildFlowMarkdown(steps) {
+    if (!steps || !steps.length) return t("flowSelectHint");
+    var lines = [
+      "## Pasos para reproducir el flujo (" + steps.length + " acciones)",
+      "- **URL inicial:** " + (state.url || steps[0].url || "—"),
+      ""
+    ];
+    steps.forEach(function (st, i) {
+      var num = i + 1;
+      var txt = st.label || st.text || "";
+      if (st.action === "navigate") {
+        lines.push(num + ". **Navegar** en `" + st.device_name + "` a `" + (st.url || st.value) + "`");
+      } else if (st.action === "click") {
+        var label = txt ? (" (\"" + txt + "\")") : "";
+        lines.push(num + ". **Clic** en `" + (st.selector || st.tag) + "`" + label + " — *[" + st.device_name + "]*");
+      } else if (st.action === "input") {
+        lines.push(num + ". **Escribir** `" + (st.value || "") + "` en `" + (st.selector || st.tag) + "` — *[" + st.device_name + "]*");
+      } else {
+        lines.push(num + ". **" + st.action + "** en `" + (st.selector || "") + "` — *[" + st.device_name + "]*");
+      }
+    });
+    return lines.join("\n");
+  }
+
+  function buildFlowPlaywright(steps) {
+    if (!steps || !steps.length) return "// Realiza acciones en cualquier pantalla para generar el test de Playwright...";
+    var startUrl = state.url || (steps[0] && steps[0].url) || "http://localhost:3000";
+    var firstDev = BY_ID[steps[0].device_id] || BY_ID[state.active[0]] || { width: 1280, height: 800 };
+    var lines = [
+      "import { test, expect } from '@playwright/test';",
+      "",
+      "test('reproducir flujo de usuario', async ({ page }) => {",
+      "  await page.setViewportSize({ width: " + firstDev.width + ", height: " + firstDev.height + " });",
+      "  await page.goto(" + JSON.stringify(startUrl) + ");",
+      ""
+    ];
+    steps.forEach(function (st) {
+      var sel = st.selector || st.tag || "body";
+      if (st.action === "navigate" && st.url) {
+        lines.push("  await page.goto(" + JSON.stringify(st.url) + ");");
+      } else if (st.action === "click") {
+        lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().click();");
+      } else if (st.action === "input") {
+        if (st.inputType === "checkbox" || st.inputType === "radio") {
+          lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().setChecked(" + (st.value === "checked" ? "true" : "false") + ");");
+        } else {
+          lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().fill(" + JSON.stringify(st.value || "") + ");");
+        }
+      }
+    });
+    lines.push("});");
+    return lines.join("\n");
+  }
+
+  function renderFlowDetail() {
+    if (!flowRawCode) return;
+    var filtered = flowState.items.filter(matchesFlowFilter);
+    if (!filtered.length) {
+      flowRawCode.textContent = t("flowSelectHint");
+      return;
+    }
+    flowRawCode.textContent = flowState.format === "playwright"
+      ? buildFlowPlaywright(filtered)
+      : buildFlowMarkdown(filtered);
+  }
+
+  function renderFlowTable(scrollToBottom) {
+    if (!flowTbody) return;
+    var filtered = flowState.items.filter(matchesFlowFilter);
+    flowTbody.innerHTML = "";
+    if (flowEmpty) flowEmpty.hidden = filtered.length > 0;
+
+    filtered.forEach(function (item) {
+      var tr = document.createElement("tr");
+      if (item.id === flowState.selectedId) tr.className = "is-selected";
+      tr.style.setProperty("--dev-color", deviceColor(item.device_id));
+
+      var tdId = document.createElement("td");
+      tdId.className = "col-id";
+      tdId.textContent = "#" + item.id;
+
+      var tdAct = document.createElement("td");
+      tdAct.className = "col-method";
+      var badge = document.createElement("span");
+      var bCls = item.action === "click" ? "method-GET" : (item.action === "input" ? "method-POST" : "method-PUT");
+      badge.className = "method-badge " + bCls;
+      badge.textContent = (item.action || "step").toUpperCase();
+      tdAct.appendChild(badge);
+
+      var tdDev = document.createElement("td");
+      tdDev.className = "col-device";
+      tdDev.appendChild(buildDeviceChip(item.device_id, item.device_name));
+
+      var tdSel = document.createElement("td");
+      tdSel.className = "col-host";
+      tdSel.textContent = item.selector || item.tag || "—";
+      tdSel.title = item.selector || "";
+
+      var tdVal = document.createElement("td");
+      tdVal.className = "col-cmsg";
+      var valText = item.action === "input"
+        ? ("Valor: \"" + (item.value || "") + "\"")
+        : (item.label || item.text || item.url || "—");
+      tdVal.textContent = valText;
+      tdVal.title = valText;
+
+      var tdTime = document.createElement("td");
+      tdTime.className = "col-ctime";
+      tdTime.textContent = item.time || "";
+
+      tr.appendChild(tdId);
+      tr.appendChild(tdAct);
+      tr.appendChild(tdDev);
+      tr.appendChild(tdSel);
+      tr.appendChild(tdVal);
+      tr.appendChild(tdTime);
+
+      tr.addEventListener("click", function () {
+        flowState.selectedId = item.id;
+        renderFlowTable(false);
+        renderFlowDetail();
+      });
+
+      flowTbody.appendChild(tr);
+    });
+
+    if (scrollToBottom) {
+      var wrap = flowTbody.closest(".traffic-table-wrap");
+      if (wrap) wrap.scrollTop = wrap.scrollHeight;
+    }
+  }
+
+  var isFetchingFlow = false;
+  function fetchFlow() {
+    if (isFetchingFlow) return;
+    isFetchingFlow = true;
+    fetch("/api/flow?since=" + flowState.lastSeq, { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !Array.isArray(data.items) || !data.items.length) return;
+        data.items.forEach(function (item) {
+          flowState.items.push(item);
+          if (item.id > flowState.lastSeq) flowState.lastSeq = item.id;
+        });
+        if (flowState.items.length > 300) {
+          flowState.items = flowState.items.slice(flowState.items.length - 300);
+        }
+        if (flowCountEl) {
+          flowCountEl.textContent = String(flowState.items.length);
+        }
+        if (trafficState.open && trafficState.panelMode === "flow") {
+          renderFlowTable(true);
+          renderFlowDetail();
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        isFetchingFlow = false;
+      });
+  }
+
+  // ---------- Inspector de Storage, Cookies y Decodificador JWT ----------
+  function decodeJwt(rawVal) {
+    if (!rawVal || typeof rawVal !== "string") return null;
+    var trimmed = rawVal.trim().replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "");
+    var parts = trimmed.split(".");
+    if (parts.length !== 3 || trimmed.indexOf("eyJ") !== 0) return null;
+    function b64Decode(str) {
+      var b64 = str.replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      try {
+        return JSON.parse(decodeURIComponent(escape(window.atob(b64))));
+      } catch (_e) {
+        try { return JSON.parse(window.atob(b64)); } catch (_e2) { return null; }
+      }
+    }
+    var header = b64Decode(parts[0]);
+    var payload = b64Decode(parts[1]);
+    if (!header || !payload) return null;
+    var expStatus = null;
+    if (typeof payload.exp === "number") {
+      var expMs = payload.exp * 1000;
+      var diffMin = Math.round((expMs - Date.now()) / 60000);
+      expStatus = {
+        date: new Date(expMs).toISOString(),
+        expired: expMs < Date.now(),
+        summary: expMs < Date.now()
+          ? ("EXPIRADO hace " + Math.abs(diffMin) + " min")
+          : ("VÁLIDO (expira en " + diffMin + " min)")
+      };
+    }
+    return { header: header, payload: payload, expStatus: expStatus };
+  }
+
+  function buildStorageRowsFromItems(rawItems) {
+    var rows = [];
+    (rawItems || []).forEach(function (it) {
+      var jwt = decodeJwt(it.value);
+      var metaParts = [];
+      if (it.domain) metaParts.push(it.domain);
+      if (it.path) metaParts.push("Path=" + it.path);
+      if (it.http_only) metaParts.push("HttpOnly");
+      if (it.secure) metaParts.push("Secure");
+      rows.push({
+        scope: it.store || "Storage",
+        device_id: it.device_id || "all",
+        device_name: it.device_name || it.device_id || "Servidor",
+        key: it.key || "",
+        value: it.value || "",
+        meta: metaParts.join(" · "),
+        jwt: jwt
+      });
+    });
+    storageState.rows = rows;
+  }
+
+  function matchesStorageFilter(row) {
+    if (trafficState.deviceFilter !== "all" && row.device_id !== "all" && row.device_id !== trafficState.deviceFilter) {
+      return false;
+    }
+    if (trafficState.searchQuery) {
+      var q = trafficState.searchQuery.toLowerCase();
+      var hay = ((row.scope || "") + " " + (row.key || "") + " " + (row.value || "") + " " + (row.device_name || "")).toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    return true;
+  }
+
+  function formatStorageRowForAi(row) {
+    if (!row) return "";
+    var lines = [
+      "### [" + row.scope + "] `" + row.key + "` (" + row.device_name + ")",
+      "- **Valor bruto:** `" + row.value + "`"
+    ];
+    if (row.meta) lines.push("- **Contexto:** `" + row.meta + "`");
+    if (row.jwt) {
+      lines.push(
+        "- **JWT Detectado:** " + (row.jwt.expStatus ? row.jwt.expStatus.summary : "Sí"),
+        "- **JWT Header:**",
+        "```json",
+        JSON.stringify(row.jwt.header, null, 2),
+        "```",
+        "- **JWT Payload:**",
+        "```json",
+        JSON.stringify(row.jwt.payload, null, 2),
+        "```"
+      );
+    }
+    return lines.join("\n");
+  }
+
+  function formatAllStorageForAi() {
+    var filtered = storageState.rows.filter(matchesStorageFilter);
+    if (!filtered.length) return "Sin cookies ni claves en localStorage/sessionStorage.";
+    return "## Estado de Storage, Cookies y JWT (" + filtered.length + " entradas)\n\n" +
+      filtered.map(formatStorageRowForAi).join("\n\n");
+  }
+
+  function renderStorageDetail() {
+    if (!storageRawCode) return;
+    var filtered = storageState.rows.filter(matchesStorageFilter);
+    var selected = (storageState.selectedIdx >= 0 && storageState.selectedIdx < filtered.length)
+      ? filtered[storageState.selectedIdx]
+      : (filtered.length ? filtered[0] : null);
+    if (!selected) {
+      storageRawCode.textContent = t("storageSelectHint");
+      return;
+    }
+    storageRawCode.textContent = formatStorageRowForAi(selected);
+  }
+
+  function renderStorageTable() {
+    if (!storageTbody) return;
+    var filtered = storageState.rows.filter(matchesStorageFilter);
+    storageTbody.innerHTML = "";
+    if (storageEmpty) storageEmpty.hidden = filtered.length > 0;
+
+    if (storageState.selectedIdx >= filtered.length) {
+      storageState.selectedIdx = filtered.length ? 0 : -1;
+    }
+
+    filtered.forEach(function (row, idx) {
+      var tr = document.createElement("tr");
+      if (idx === storageState.selectedIdx) tr.className = "is-selected";
+      tr.style.setProperty("--dev-color", row.device_id === "all" ? "#f59e0b" : deviceColor(row.device_id));
+
+      var tdScope = document.createElement("td");
+      tdScope.className = "col-method";
+      var sBadge = document.createElement("span");
+      sBadge.className = "method-badge " + (row.scope.indexOf("Cookie") === 0 ? "method-PUT" : (row.scope === "localStorage" ? "method-GET" : "method-POST"));
+      sBadge.textContent = row.jwt ? (row.scope + " · JWT") : row.scope;
+      tdScope.appendChild(sBadge);
+
+      var tdDev = document.createElement("td");
+      tdDev.className = "col-device";
+      if (row.device_id === "all") {
+        tdDev.textContent = "🌐 " + row.device_name;
+      } else {
+        tdDev.appendChild(buildDeviceChip(row.device_id, row.device_name));
+      }
+
+      var tdKey = document.createElement("td");
+      tdKey.className = "col-host";
+      tdKey.textContent = row.key;
+      tdKey.title = row.key;
+
+      var tdVal = document.createElement("td");
+      tdVal.className = "col-cmsg";
+      tdVal.textContent = row.jwt && row.jwt.expStatus
+        ? ("🔑 [" + row.jwt.expStatus.summary + "] " + row.value)
+        : row.value;
+      tdVal.title = row.value;
+
+      tr.appendChild(tdScope);
+      tr.appendChild(tdDev);
+      tr.appendChild(tdKey);
+      tr.appendChild(tdVal);
+
+      tr.addEventListener("click", function () {
+        storageState.selectedIdx = idx;
+        renderStorageTable();
+        renderStorageDetail();
+      });
+
+      storageTbody.appendChild(tr);
+    });
+  }
+
+  var isFetchingStorage = false;
+  function fetchStorage() {
+    if (isFetchingStorage) return;
+    isFetchingStorage = true;
+    fetch("/api/storage", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !Array.isArray(data.items)) return;
+        buildStorageRowsFromItems(data.items);
+        if (storageState.selectedIdx === -1 && storageState.rows.length) {
+          storageState.selectedIdx = 0;
+        }
+        if (trafficState.open && trafficState.panelMode === "storage") {
+          renderStorageTable();
+          renderStorageDetail();
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        isFetchingStorage = false;
+      });
+  }
+
+  function requestFramesStorage() {
+    state.active.forEach(function (id) {
+      var item = els[id];
+      if (item && item.iframe && !item.iframe.hidden && item.iframe.contentWindow) {
+        try {
+          item.iframe.contentWindow.postMessage({ type: "rv:request_storage" }, location.origin);
+        } catch (_e) {}
+      }
+    });
+    fetchStorage();
+  }
+
+  // ---------- Cambio de Pestañas del Panel DevTools (HTTP / Consola / Auditoría / Flujo / Storage) ----------
+  function setPanelMode(mode) {
+    var validModes = ["traffic", "console", "audit", "flow", "storage"];
+    trafficState.panelMode = validModes.indexOf(mode) > -1 ? mode : "traffic";
+    var m = trafficState.panelMode;
+
+    if (panelModeTraffic) panelModeTraffic.classList.toggle("is-active", m === "traffic");
+    if (panelModeConsole) panelModeConsole.classList.toggle("is-active", m === "console");
+    if (panelModeAudit) panelModeAudit.classList.toggle("is-active", m === "audit");
+    if (panelModeFlow) panelModeFlow.classList.toggle("is-active", m === "flow");
+    if (panelModeStorage) panelModeStorage.classList.toggle("is-active", m === "storage");
+
+    if (trafficMethodPills) trafficMethodPills.hidden = m !== "traffic";
+    if (consoleLevelPills) consoleLevelPills.hidden = m !== "console";
+
+    if (trafficSplitView) trafficSplitView.hidden = m !== "traffic";
+    if (consoleSplitView) consoleSplitView.hidden = m !== "console";
+    if (auditSplitView) auditSplitView.hidden = m !== "audit";
+    if (flowSplitView) flowSplitView.hidden = m !== "flow";
+    if (storageSplitView) storageSplitView.hidden = m !== "storage";
 
     if (trafficBtn) {
-      var tActive = trafficState.open && !isConsole;
+      var tActive = trafficState.open && m === "traffic";
       trafficBtn.setAttribute("aria-pressed", tActive ? "true" : "false");
       trafficBtn.classList.toggle("is-active", tActive);
     }
     if (consoleBtn) {
-      var cActive = trafficState.open && isConsole;
+      var cActive = trafficState.open && m === "console";
       consoleBtn.setAttribute("aria-pressed", cActive ? "true" : "false");
       consoleBtn.classList.toggle("is-active", cActive);
     }
+    if (auditBtn) {
+      var aActive = trafficState.open && m === "audit";
+      auditBtn.setAttribute("aria-pressed", aActive ? "true" : "false");
+      auditBtn.classList.toggle("is-active", aActive);
+    }
+    if (flowBtn) {
+      var fActive = trafficState.open && m === "flow";
+      flowBtn.setAttribute("aria-pressed", fActive ? "true" : "false");
+      flowBtn.classList.toggle("is-active", fActive);
+    }
 
     if (trafficState.open) {
-      if (isConsole) {
+      if (m === "console") {
         fetchConsole();
         renderConsoleTable(true);
         renderConsoleDetail();
+      } else if (m === "audit") {
+        triggerAuditScan();
+        fetchAudit();
+        renderAuditTable();
+        renderAuditDetail();
+      } else if (m === "flow") {
+        fetchFlow();
+        renderFlowTable(true);
+        renderFlowDetail();
+      } else if (m === "storage") {
+        requestFramesStorage();
+        renderStorageTable();
+        renderStorageDetail();
       } else {
         fetchTraffic();
         renderTrafficTable(true);
@@ -1629,6 +2446,392 @@
     if (trafficPanel) trafficPanel.hidden = !trafficState.open;
     setPanelMode(trafficState.panelMode);
     setTimeout(layout, 50);
+  }
+
+  // ---------- Generador de Reporte IA de 1 Clic (Markdown Estructurado) ----------
+  function getAiModalToggleMap() {
+    var map = { element: true, console: true, http: true, audit: true, flow: true, storage: true };
+    if (!aiModalToggles) return map;
+    Array.prototype.slice.call(aiModalToggles.querySelectorAll("input[data-sec]")).forEach(function (chk) {
+      map[chk.dataset.sec] = !!chk.checked;
+    });
+    return map;
+  }
+
+  function buildAiMarkdownReport() {
+    var inc = getAiModalToggleMap();
+    var nowStr = new Date().toLocaleTimeString();
+    var activeDevs = state.active.map(function (id) {
+      var d = BY_ID[id];
+      return d ? (d.name + " (" + d.width + "×" + d.height + " @" + d.dpr + "x)") : id;
+    });
+
+    var md = [
+      "# 🐛 Reporte de Contexto Web para IA",
+      "- **URL activa:** " + (state.url || "—"),
+      "- **Pantallas activas (" + activeDevs.length + "):** " + (activeDevs.join(", ") || "Ninguna"),
+      "- **Hora de captura:** " + nowStr,
+      ""
+    ];
+
+    if (inc.element) {
+      md.push("## 1. Último Elemento Inspeccionado y Estilos Computados");
+      if (lastInspectedElement) {
+        md.push(
+          "- **Dispositivo:** " + (lastInspectedElement.device_name || lastInspectedElement.frame),
+          "- **URL del frame:** " + (lastInspectedElement.url || state.url || "—"),
+          "- **Selector CSS:** `" + (lastInspectedElement.selector || "—") + "`",
+          "- **Layout Box:** `" + (formatBoxString(lastInspectedElement.box) || "—") + "`",
+          "- **Computed Styles:** `" + (lastInspectedElement.stylesSummary || "—") + "`",
+          "```html",
+          lastInspectedElement.html || "",
+          "```",
+          ""
+        );
+      } else {
+        md.push("_Ningún elemento seleccionado recientemente (usa el botón Inspeccionar y haz clic sobre un elemento)._", "");
+      }
+    }
+
+    if (inc.console) {
+      var errWarns = consoleState.items.filter(function (c) {
+        return c.level === "error" || c.level === "warn";
+      }).slice(-15);
+      var recentLogs = errWarns.length ? errWarns : consoleState.items.slice(-10);
+      md.push("## 2. Consola del Navegador (" + errWarns.length + " errores/warnings)");
+      if (recentLogs.length) {
+        recentLogs.forEach(function (c) {
+          md.push("- **[" + c.level.toUpperCase() + "]** (" + c.device_name + " · " + c.time + "): `" + (c.message || "").replace(/\n/g, " ") + "`" + (c.source ? " _[" + c.source + "]_" : ""));
+          if (c.stack && c.level === "error") {
+            md.push("  ```", "  " + c.stack.split("\n").slice(0, 5).join("\n  "), "  ```");
+          }
+        });
+        md.push("");
+      } else {
+        md.push("_Sin errores ni eventos en la consola._", "");
+      }
+    }
+
+    if (inc.http) {
+      var failedHttp = trafficState.items.filter(function (r) { return r.status >= 400 || r.status === 0; }).slice(-10);
+      var recentHttp = trafficState.items.slice(-8);
+      md.push("## 3. Tráfico HTTP / API (" + failedHttp.length + " peticiones fallidas 4xx/5xx)");
+      if (failedHttp.length) {
+        md.push("### Peticiones con error (4xx / 5xx):");
+        failedHttp.forEach(function (r) {
+          md.push(
+            "- **" + r.method + " " + r.url + "** → **HTTP " + r.status + "** (" + r.device_name + ", " + r.duration_ms + " ms)",
+            "  - Response Body: `" + ((r.res_body || "").slice(0, 260).replace(/\s+/g, " ") || "vacío") + "`"
+          );
+        });
+      }
+      if (recentHttp.length) {
+        md.push("### Últimas peticiones HTTP:");
+        recentHttp.forEach(function (r) {
+          md.push("- `" + r.method + "` `" + r.path + "` → **" + r.status + "** (" + r.device_name + ", " + r.mime + ", " + r.duration_ms + " ms)");
+        });
+      } else {
+        md.push("_Sin tráfico HTTP registrado._");
+      }
+      md.push("");
+    }
+
+    if (inc.audit) {
+      md.push("## 4. Auditoría Visual y Responsiva (" + auditState.items.length + " hallazgos)");
+      if (auditState.items.length) {
+        auditState.items.slice(0, 15).forEach(function (a) {
+          md.push("- **[" + a.kind + "]** en **" + a.device_name + "** (`" + a.selector + "`): " + a.summary + " — _" + a.detail + "_");
+        });
+      } else {
+        md.push("_Sin desbordamientos horizontales ni imágenes rotas detectadas._");
+      }
+      md.push("");
+    }
+
+    if (inc.flow) {
+      var recentSteps = flowState.items.slice(-15);
+      md.push("## 5. Últimos Pasos del Usuario (Reproducción)");
+      if (recentSteps.length) {
+        recentSteps.forEach(function (st, idx) {
+          var lbl = st.label || st.text || "";
+          if (st.action === "navigate") {
+            md.push((idx + 1) + ". Navegar a `" + (st.url || st.value) + "` (" + st.device_name + ")");
+          } else if (st.action === "click") {
+            md.push((idx + 1) + ". Clic en `" + st.selector + "`" + (lbl ? " (\"" + lbl + "\")" : "") + " (" + st.device_name + ")");
+          } else if (st.action === "input") {
+            md.push((idx + 1) + ". Escribir `" + st.value + "` en `" + st.selector + "` (" + st.device_name + ")");
+          }
+        });
+      } else {
+        md.push("_Sin interacciones grabadas aún._");
+      }
+      md.push("");
+    }
+
+    if (inc.storage) {
+      md.push("## 6. Estado de Sesión (Cookies, Storage y JWT)");
+      if (storageState.rows.length) {
+        storageState.rows.slice(0, 15).forEach(function (row) {
+          var jwtInfo = row.jwt && row.jwt.expStatus ? (" — **JWT: " + row.jwt.expStatus.summary + "**") : "";
+          md.push("- **[" + row.scope + "]** `" + row.key + "` = `" + String(row.value).slice(0, 90) + "` (" + row.device_name + ")" + jwtInfo);
+        });
+      } else {
+        md.push("_Sin cookies ni datos en localStorage/sessionStorage._");
+      }
+      md.push("");
+    }
+
+    return md.join("\n");
+  }
+
+  function openAiReportModal() {
+    triggerAuditScan();
+    requestFramesStorage();
+    Promise.all([
+      fetch("/api/inspected", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/audit", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/flow?since=0", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/storage", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+    ]).then(function (results) {
+      if (results[0] && results[0].item) lastInspectedElement = results[0].item;
+      if (results[1] && Array.isArray(results[1].items)) {
+        auditState.items = results[1].items;
+        updateAuditBadge();
+      }
+      if (results[2] && Array.isArray(results[2].items)) {
+        flowState.items = results[2].items;
+        if (flowCountEl) flowCountEl.textContent = String(flowState.items.length);
+      }
+      if (results[3] && Array.isArray(results[3].items)) {
+        buildStorageRowsFromItems(results[3].items);
+      }
+
+      var reportMd = buildAiMarkdownReport();
+      if (aiReportTextarea) aiReportTextarea.value = reportMd;
+      if (aiReportModal) aiReportModal.hidden = false;
+      // Copiado inmediato de 1 clic al portapapeles para pegar directo en el chat de IA
+      copyText(reportMd, t("aiReportCopied"));
+    });
+  }
+
+  // ---------- Captura Visual Anotada (PNG 2x al Portapapeles) ----------
+  function requestDomSnapshotFromFrame(id) {
+    return new Promise(function (resolve) {
+      var item = els[id];
+      if (!item || !item.iframe || item.iframe.hidden || !item.iframe.contentWindow) {
+        resolve(null);
+        return;
+      }
+      var timer = setTimeout(function () {
+        delete pendingDomSnapshots[id];
+        resolve(null);
+      }, 360);
+      pendingDomSnapshots[id] = function (snap) {
+        clearTimeout(timer);
+        resolve(snap);
+      };
+      try {
+        item.iframe.contentWindow.postMessage({ type: "rv:request_dom_layout" }, location.origin);
+      } catch (_e) {
+        clearTimeout(timer);
+        delete pendingDomSnapshots[id];
+        resolve(null);
+      }
+    });
+  }
+
+  function captureAnnotatedSnapshot() {
+    if (!state.active.length) {
+      toast(t("toastNoDevices"));
+      return;
+    }
+    Promise.all(state.active.map(requestDomSnapshotFromFrame)).then(function (snapshots) {
+      var snapByFrame = {};
+      snapshots.forEach(function (s) {
+        if (s && s.frame) snapByFrame[s.frame] = s;
+      });
+
+      var dpr = 2;
+      var stageRect = stage.getBoundingClientRect();
+      var headerH = 54;
+      var footerH = 44;
+      var canvasW = Math.max(960, Math.round(stageRect.width));
+      var canvasH = Math.max(540, Math.round(stageRect.height)) + headerH + footerH;
+
+      var canvas = document.createElement("canvas");
+      canvas.width = canvasW * dpr;
+      canvas.height = canvasH * dpr;
+      var ctx = canvas.getContext("2d");
+      ctx.scale(dpr, dpr);
+
+      // Fondo oscuro del tapete
+      ctx.fillStyle = "#14191F";
+      ctx.fillRect(0, 0, canvasW, canvasH);
+
+      // Cuadrícula sutil
+      ctx.strokeStyle = "rgba(255,255,255,0.035)";
+      ctx.lineWidth = 1;
+      for (var gx = 0; gx < canvasW; gx += 40) {
+        ctx.beginPath(); ctx.moveTo(gx, headerH); ctx.lineTo(gx, canvasH - footerH); ctx.stroke();
+      }
+      for (var gy = headerH; gy < canvasH - footerH; gy += 40) {
+        ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(canvasW, gy); ctx.stroke();
+      }
+
+      // Barra superior del reporte visual
+      ctx.fillStyle = "#0F172A";
+      ctx.fillRect(0, 0, canvasW, headerH);
+      ctx.strokeStyle = "#38BDF8";
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, headerH); ctx.lineTo(canvasW, headerH); ctx.stroke();
+
+      ctx.fillStyle = "#F8FAFC";
+      ctx.font = "bold 15px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText("📸 DevTool Multi-Display · Snapshot Visual Anotado para IA", 16, 23);
+
+      ctx.fillStyle = "#94A3B8";
+      ctx.font = "500 12px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.fillText("URL: " + (state.url || "—") + "   |   Dispositivos: " + state.active.length + "   |   Auditoría: " + auditState.items.length + " avisos", 16, 42);
+
+      // Dibujar cada dispositivo activo
+      state.active.forEach(function (id) {
+        var e = els[id];
+        var d = BY_ID[id];
+        if (!e || !d) return;
+        var screenRect = e.screen.getBoundingClientRect();
+        var dx = screenRect.left - stageRect.left;
+        var dy = screenRect.top - stageRect.top + headerH;
+        var dw = screenRect.width;
+        var dh = screenRect.height;
+        var col = deviceColor(id);
+        var scale = dw / Math.max(1, d.width);
+
+        // Marco con el color único del dispositivo
+        ctx.save();
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 3;
+        ctx.fillStyle = "#0B0F13";
+        ctx.fillRect(dx - 3, dy - 3, dw + 6, dh + 6);
+        ctx.strokeRect(dx - 3, dy - 3, dw + 6, dh + 6);
+
+        // Contenido de la pantalla (DOM Layout Snapshot)
+        ctx.beginPath();
+        ctx.rect(dx, dy, dw, dh);
+        ctx.clip();
+
+        var snap = snapByFrame[id];
+        var bgPageCol = (snap && (snap.bgPage || snap.bg) && (snap.bgPage || snap.bg) !== "rgba(0, 0, 0, 0)") ? (snap.bgPage || snap.bg) : "#FFFFFF";
+        ctx.fillStyle = bgPageCol;
+        ctx.fillRect(dx, dy, dw, dh);
+
+        if (snap && Array.isArray(snap.nodes)) {
+          snap.nodes.forEach(function (n) {
+            var nx = dx + n.x * scale;
+            var ny = dy + n.y * scale;
+            var nw = n.w * scale;
+            var nh = n.h * scale;
+            if (n.bg) {
+              ctx.fillStyle = n.bg;
+              ctx.fillRect(nx, ny, nw, nh);
+            }
+            if (n.tag === "img" || n.isImg) {
+              ctx.fillStyle = "rgba(148, 163, 184, 0.22)";
+              ctx.fillRect(nx, ny, nw, nh);
+            }
+            var borderCol = n.border || n.bCol;
+            if (borderCol) {
+              ctx.strokeStyle = borderCol;
+              ctx.lineWidth = 1;
+              ctx.strokeRect(nx, ny, nw, nh);
+            }
+            if (n.text) {
+              ctx.fillStyle = n.color || "#1E293B";
+              var fSize = Math.max(7, Math.min(22, Math.round(((n.fontSize || n.fSize || 13)) * scale)));
+              var fwNum = parseInt(n.fontWeight || n.fWeight || "400", 10);
+              ctx.font = (fwNum >= 600 ? "bold " : "") + fSize + "px -apple-system, sans-serif";
+              ctx.fillText(n.text.slice(0, 42), nx + 3, ny + Math.min(nh - 2, fSize + 3));
+            }
+          });
+        }
+
+        // Anotaciones de Auditoría Visual (en rojo/naranja) sobre la pantalla
+        var devIssues = auditState.items.filter(function (iss) { return iss.device_id === id && iss.box && iss.box.width; });
+        devIssues.forEach(function (iss, iIdx) {
+          var ix = dx + (iss.box.x || 0) * scale;
+          var iy = dy + (iss.box.y || 0) * scale;
+          var iw = Math.max(16, Math.min(dw - 4, iss.box.width * scale));
+          var ih = Math.max(14, Math.min(dh - 4, iss.box.height * scale));
+          var isErr = iss.severity === "error";
+          ctx.strokeStyle = isErr ? "#EF4444" : "#F59E0B";
+          ctx.lineWidth = 2;
+          ctx.fillStyle = isErr ? "rgba(239, 68, 68, 0.18)" : "rgba(245, 158, 11, 0.16)";
+          ctx.fillRect(ix, iy, iw, ih);
+          ctx.strokeRect(ix, iy, iw, ih);
+
+          var tagTxt = "!" + (iIdx + 1) + " " + iss.kind;
+          ctx.font = "bold 9.5px ui-monospace, monospace";
+          var tw = ctx.measureText(tagTxt).width + 8;
+          ctx.fillStyle = isErr ? "#DC2626" : "#D97706";
+          ctx.fillRect(ix, Math.max(dy, iy - 14), tw, 14);
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillText(tagTxt, ix + 4, Math.max(dy + 10, iy - 4));
+        });
+
+        ctx.restore();
+
+        // Etiqueta inferior del dispositivo
+        ctx.fillStyle = col;
+        ctx.beginPath();
+        ctx.arc(dx + 8, dy + dh + 15, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#F1F5F9";
+        ctx.font = "bold 11.5px -apple-system, sans-serif";
+        ctx.fillText(d.name + "  (" + d.width + "×" + d.height + ")", dx + 18, dy + dh + 19);
+      });
+
+      // Barra inferior con resumen de errores de Consola y HTTP
+      ctx.fillStyle = "#0F172A";
+      ctx.fillRect(0, canvasH - footerH, canvasW, footerH);
+      var errCount = consoleState.items.filter(function (c) { return c.level === "error"; }).length;
+      var httpErrCount = trafficState.items.filter(function (r) { return r.status >= 400; }).length;
+      var inspText = lastInspectedElement
+        ? ("Último elemento: " + lastInspectedElement.selector + " [" + lastInspectedElement.device_name + "]")
+        : "Sin elemento inspeccionado";
+      ctx.fillStyle = "#E2E8F0";
+      ctx.font = "600 11.5px ui-monospace, monospace";
+      ctx.fillText(
+        "Consola Errores: " + errCount + "   |   HTTP 4xx/5xx: " + httpErrCount + "   |   " + inspText,
+        16,
+        canvasH - 17
+      );
+
+      canvas.toBlob(function (blob) {
+        if (!blob) return;
+        if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== "undefined") {
+          var item = new ClipboardItem({ "image/png": blob });
+          navigator.clipboard.write([item]).then(function () {
+            toast(t("snapshotCopied"));
+          }).catch(function () {
+            downloadBlobFallback(blob);
+          });
+        } else {
+          downloadBlobFallback(blob);
+        }
+      }, "image/png");
+    });
+  }
+
+  function downloadBlobFallback(blob) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "devtool-ai-snapshot-" + Date.now() + ".png";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 3000);
+    toast(t("snapshotDownloaded"));
   }
 
   function buildCurl(item) {
@@ -1659,12 +2862,144 @@
   if (consoleBtn) {
     consoleBtn.addEventListener("click", function () { toggleTrafficPanel(undefined, "console"); });
   }
+  if (auditBtn) {
+    auditBtn.addEventListener("click", function () { toggleTrafficPanel(undefined, "audit"); });
+  }
+  if (flowBtn) {
+    flowBtn.addEventListener("click", function () { toggleTrafficPanel(undefined, "flow"); });
+  }
   if (panelModeTraffic) {
     panelModeTraffic.addEventListener("click", function () { setPanelMode("traffic"); });
   }
   if (panelModeConsole) {
     panelModeConsole.addEventListener("click", function () { setPanelMode("console"); });
   }
+  if (panelModeAudit) {
+    panelModeAudit.addEventListener("click", function () { setPanelMode("audit"); });
+  }
+  if (panelModeFlow) {
+    panelModeFlow.addEventListener("click", function () { setPanelMode("flow"); });
+  }
+  if (panelModeStorage) {
+    panelModeStorage.addEventListener("click", function () { setPanelMode("storage"); });
+  }
+  if (aiReportBtn) {
+    aiReportBtn.addEventListener("click", openAiReportModal);
+  }
+  if (panelAiReportBtn) {
+    panelAiReportBtn.addEventListener("click", openAiReportModal);
+  }
+  if (snapshotBtn) {
+    snapshotBtn.addEventListener("click", captureAnnotatedSnapshot);
+  }
+  if (panelSnapshotBtn) {
+    panelSnapshotBtn.addEventListener("click", captureAnnotatedSnapshot);
+  }
+  if (aiModalClose) {
+    aiModalClose.addEventListener("click", function () {
+      if (aiReportModal) aiReportModal.hidden = true;
+    });
+  }
+  if (aiReportModal) {
+    aiReportModal.addEventListener("click", function (ev) {
+      if (ev.target === aiReportModal) aiReportModal.hidden = true;
+    });
+  }
+  if (aiModalToggles) {
+    aiModalToggles.addEventListener("change", function () {
+      var md = buildAiMarkdownReport();
+      if (aiReportTextarea) aiReportTextarea.value = md;
+    });
+  }
+  if (aiModalCopyBtn) {
+    aiModalCopyBtn.addEventListener("click", function () {
+      var txt = aiReportTextarea ? aiReportTextarea.value : buildAiMarkdownReport();
+      copyText(txt, t("aiReportCopied"));
+    });
+  }
+  if (aiModalSnapshotBtn) {
+    aiModalSnapshotBtn.addEventListener("click", captureAnnotatedSnapshot);
+  }
+
+  // Controles de Auditoría Visual
+  if (auditScanBtn) {
+    auditScanBtn.addEventListener("click", function () {
+      triggerAuditScan();
+      setTimeout(fetchAudit, 160);
+    });
+  }
+  if (auditHighlightBtn) {
+    auditHighlightBtn.addEventListener("click", function () {
+      toggleAuditHighlight();
+    });
+  }
+  if (auditCopyOneBtn) {
+    auditCopyOneBtn.addEventListener("click", function () {
+      var filtered = auditState.items.filter(matchesAuditFilter);
+      var sel = (auditState.selectedIdx >= 0 && auditState.selectedIdx < filtered.length)
+        ? filtered[auditState.selectedIdx]
+        : filtered[0];
+      if (sel) copyText(formatAuditIssueForAi(sel), t("copiedAudit"));
+    });
+  }
+  if (auditCopyAllBtn) {
+    auditCopyAllBtn.addEventListener("click", function () {
+      copyText(formatAllAuditIssuesForAi(), t("copiedAudit"));
+    });
+  }
+
+  // Controles de Flujo / Pasos
+  if (flowTabMd) {
+    flowTabMd.addEventListener("click", function () {
+      flowState.format = "markdown";
+      flowTabMd.classList.add("is-active");
+      if (flowTabPw) flowTabPw.classList.remove("is-active");
+      renderFlowDetail();
+    });
+  }
+  if (flowTabPw) {
+    flowTabPw.addEventListener("click", function () {
+      flowState.format = "playwright";
+      flowTabPw.classList.add("is-active");
+      if (flowTabMd) flowTabMd.classList.remove("is-active");
+      renderFlowDetail();
+    });
+  }
+  if (flowRecordToggle) {
+    flowRecordToggle.addEventListener("click", function () {
+      flowState.recording = !flowState.recording;
+      flowRecordToggle.setAttribute("aria-pressed", flowState.recording ? "true" : "false");
+      flowRecordToggle.classList.toggle("is-active", flowState.recording);
+      flowRecordToggle.textContent = flowState.recording ? t("flowRecording") : t("flowPaused");
+    });
+  }
+  if (flowCopyBtn) {
+    flowCopyBtn.addEventListener("click", function () {
+      var filtered = flowState.items.filter(matchesFlowFilter);
+      var txt = flowState.format === "playwright" ? buildFlowPlaywright(filtered) : buildFlowMarkdown(filtered);
+      copyText(txt, t("copiedFlow"));
+    });
+  }
+
+  // Controles de Storage / Cookies / JWT
+  if (storageRefreshBtn) {
+    storageRefreshBtn.addEventListener("click", requestFramesStorage);
+  }
+  if (storageCopyOneBtn) {
+    storageCopyOneBtn.addEventListener("click", function () {
+      var filtered = storageState.rows.filter(matchesStorageFilter);
+      var sel = (storageState.selectedIdx >= 0 && storageState.selectedIdx < filtered.length)
+        ? filtered[storageState.selectedIdx]
+        : filtered[0];
+      if (sel) copyText(formatStorageRowForAi(sel), t("copiedStorage"));
+    });
+  }
+  if (storageCopyAllBtn) {
+    storageCopyAllBtn.addEventListener("click", function () {
+      copyText(formatAllStorageForAi(), t("copiedStorage"));
+    });
+  }
+
   if (trafficCloseBtn) {
     trafficCloseBtn.addEventListener("click", function () { toggleTrafficPanel(false); });
   }
@@ -1677,12 +3012,15 @@
       if (!trafficState.paused) {
         fetchTraffic();
         fetchConsole();
+        fetchFlow();
+        fetchAudit();
       }
     });
   }
   if (trafficClearBtn) {
     trafficClearBtn.addEventListener("click", function () {
-      if (trafficState.panelMode === "console") {
+      var m = trafficState.panelMode;
+      if (m === "console") {
         fetch("/api/console/clear", { method: "POST", credentials: "same-origin" }).catch(function () {});
         consoleState.items = [];
         consoleState.selectedId = null;
@@ -1690,6 +3028,24 @@
         renderConsoleTable();
         renderConsoleDetail();
         postCrossTab({ type: "bc:console_clear" });
+      } else if (m === "audit") {
+        fetch("/api/audit/clear", { method: "POST", credentials: "same-origin" }).catch(function () {});
+        auditState.items = [];
+        auditState.selectedIdx = -1;
+        updateAuditBadge();
+        renderAuditTable();
+        renderAuditDetail();
+        postCrossTab({ type: "bc:audit_clear" });
+      } else if (m === "flow") {
+        fetch("/api/flow/clear", { method: "POST", credentials: "same-origin" }).catch(function () {});
+        flowState.items = [];
+        flowState.selectedId = null;
+        if (flowCountEl) flowCountEl.textContent = "0";
+        renderFlowTable();
+        renderFlowDetail();
+        postCrossTab({ type: "bc:flow_clear" });
+      } else if (m === "storage") {
+        requestFramesStorage();
       } else {
         fetch("/api/traffic/clear", { method: "POST", credentials: "same-origin" }).catch(function () {});
         trafficState.items = [];
@@ -1721,6 +3077,12 @@
       trafficState.searchQuery = trafficSearch.value.trim();
       renderTrafficTable();
       renderConsoleTable();
+      renderAuditTable();
+      renderAuditDetail();
+      renderFlowTable();
+      renderFlowDetail();
+      renderStorageTable();
+      renderStorageDetail();
     });
   }
   if (trafficDeviceFilter) {
@@ -1728,6 +3090,12 @@
       trafficState.deviceFilter = trafficDeviceFilter.value;
       renderTrafficTable();
       renderConsoleTable();
+      renderAuditTable();
+      renderAuditDetail();
+      renderFlowTable();
+      renderFlowDetail();
+      renderStorageTable();
+      renderStorageDetail();
     });
   }
   if (trafficMethodPills) {
@@ -1876,7 +3244,9 @@
   setInterval(function () {
     fetchTraffic();
     fetchConsole();
-  }, 800);
+    fetchFlow();
+    fetchAudit();
+  }, 900);
 
   // ---------- Menú Agregar dispositivo ----------
   function buildMenu() {
@@ -2031,8 +3401,9 @@
 
   if (paramMode === "traffic") {
     document.body.classList.add("is-traffic-standalone");
-    var initialTab = paramTab === "console" ? "console" : "traffic";
-    document.title = (initialTab === "console" ? t("console") : t("trafficTitle")) + " — Responsive Viewer";
+    var validTabs = ["traffic", "console", "audit", "flow", "storage"];
+    var initialTab = validTabs.indexOf(paramTab) > -1 ? paramTab : "traffic";
+    document.title = t("trafficTitle") + " — Responsive Viewer";
     toggleTrafficPanel(true, initialTab);
     return;
   }
