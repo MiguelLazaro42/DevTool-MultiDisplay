@@ -44,6 +44,8 @@ DEVICES = [
      "width": 820, "height": 1180, "dpr": 2, "kind": "tablet", "ua": UA_IPAD},
     {"id": "laptop", "name": "Laptop", "group": "desktop",
      "width": 1366, "height": 768, "dpr": 1, "kind": "desktop", "ua": UA_DESKTOP},
+    {"id": "macbook-pro-16", "name": "MacBook Pro 16\"", "group": "desktop",
+     "width": 1728, "height": 1117, "dpr": 2, "kind": "desktop", "ua": UA_DESKTOP},
     {"id": "desktop-hd", "name": "Desktop Full HD", "group": "desktop",
      "width": 1920, "height": 1080, "dpr": 1, "kind": "desktop", "ua": UA_DESKTOP},
 ]

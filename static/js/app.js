@@ -459,24 +459,28 @@
 
     var best = null;
     var isFill = state.zoomMode === "fill";
-    var isPortraitStage = H > W * 1.05;
+    // Detectamos monitor vertical (portrait) tanto por las dimensiones del contenedor como de la ventana/pantalla
+    var isPortraitStage = H > W || window.innerHeight > window.innerWidth;
     var forceVerticalStack = state.stackMode === "stack";
 
+    // Si estamos en un monitor vertical (portrait) o en modo Apilar (Vertical),
+    // cada dispositivo que esté solo en su propia fila se escala independientemente para llenar
+    // el 100% del ancho útil del monitor vertical, sin que un dispositivo de 1920px encoja al de 1366px.
     for (var r = 1; r <= n; r++) {
-      // Si el usuario activó el modo Apilar/Vertical (o está en un monitor vertical con pantallas anchas),
-      // priorizamos acomodar las pantallas una debajo de otra para aprovechar el ancho completo del monitor vertical.
       if (forceVerticalStack && r < n) continue;
 
       var rows = partitionRows(devices, r, vW);
       if (rows.length !== r) continue;
 
-      // En monitores verticales (portrait), evitamos poner múltiples dispositivos de escritorio/laptop en la misma fila
-      // porque al ser pantallas horizontales (16:9) se encogerían a la mitad de su ancho innecesariamente.
+      // En monitores verticales:
+      // - Nunca ponemos un Desktop/Laptop junto a otro dispositivo en la misma fila.
+      // - Si hay 3 o menos dispositivos en total, los apilamos 1 por fila para aprovechar la altura del monitor vertical.
       if (!forceVerticalStack && isPortraitStage && r < n) {
-        var hasMultiWideInRow = rows.some(function (row) {
-          return row.length > 1 && row.some(function (d) { return d.width >= 1000 || d.kind === "desktop"; });
+        if (n <= 3) continue;
+        var hasDesktopSharingRow = rows.some(function (row) {
+          return row.length > 1 && row.some(function (d) { return d.width >= 900 || d.kind === "desktop"; });
         });
-        if (hasMultiWideInRow) continue;
+        if (hasDesktopSharingRow) continue;
       }
 
       var sCandidate = 2.0;
@@ -488,11 +492,10 @@
         sumRowH += Math.max.apply(null, row.map(vH));
       });
       var freeH = H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y;
-      // En modo Fill sobre monitores verticales o apilado vertical, permitimos que las filas aprovechen el ancho
-      // completo aunque la altura total supere ligeramente el alto visible (permitiendo scroll vertical suave).
       var heightFit = freeH / sumRowH;
       if ((isFill && isPortraitStage && r > 1) || forceVerticalStack) {
-        sCandidate = Math.min(sCandidate, Math.max(heightFit, sCandidate * 0.92));
+        // En modo Fill sobre monitor vertical, priorizamos llenar el ancho del monitor
+        sCandidate = Math.min(sCandidate, Math.max(heightFit, sCandidate));
       } else {
         sCandidate = Math.min(sCandidate, heightFit);
       }
@@ -509,10 +512,14 @@
       s = state.zoomMode;
     }
     state.isAutoVertical = isPortraitStage && best.rows.length === n && n > 1;
-    setZoom(s);
 
-    // En modo Fill, si hay varias filas y una fila es más angosta que el ancho disponible,
-    // le damos un impulso extra de escala (respetando la altura libre) para aprovechar la ventana.
+    var isStackedPortrait = (isPortraitStage || forceVerticalStack) && best.rows.length > 1;
+    var effectiveZoomSamples = [];
+
+    // Calculamos la escala final de cada dispositivo:
+    // En monitor vertical / modo Vertical, si una fila tiene 1 solo dispositivo (ej. Laptop 1366 o Desktop 1920),
+    // ese dispositivo llena directamente el ancho disponible W (en modo Fill) o se reparte proporcionalmente el alto (en modo Fit),
+    // ignorando la penalización cruzada de `relScales` para que todos tengan el mismo ancho visual limpio.
     var extraH = isFill ? Math.max(0, best.freeH - best.sumRowH * s) : 0;
     var extraHPerRow = best.rows.length > 0 ? (extraH / best.rows.length) : 0;
 
@@ -524,22 +531,44 @@
       var maxRowHAllowed = maxH * s + extraHPerRow;
       var sByW = sumW > 0 ? (freeW / sumW) : s;
       var sByH = maxH > 0 ? (maxRowHAllowed / maxH) : s;
-      // En monitor vertical con dispositivos apilados (1 por fila), cada pantalla aprovecha su propio ancho al 100%
-      if ((isPortraitStage || forceVerticalStack) && row.length === 1) {
-        var maxVerticalBoost = forceVerticalStack ? sByW : Math.min(sByW, sByH * 1.15);
-        return Math.max(s, Math.min(2.0, maxVerticalBoost));
-      }
       return Math.max(s, Math.min(s * 1.28, sByW, sByH));
     });
 
+    function computeDeviceScale(d, row, ri) {
+      if (isStackedPortrait && row.length === 1 && (state.zoomMode === "fill" || state.zoomMode === "fit")) {
+        var freeW = W - BEZEL;
+        var fitWScale = freeW / d.width;
+        if (state.zoomMode === "fill" || forceVerticalStack) {
+          // Si todas las filas caben en la altura H a ancho completo, usamos 100% del ancho.
+          // Si no caben todas en H pero estamos en modo Fill, igual llenamos el 96% del ancho para que se vean grandes y nítidas.
+          var perRowFreeH = (H - best.rows.length * (BEZEL + CAPTION) - (best.rows.length - 1) * GAP_Y) / best.rows.length;
+          var fitHScale = perRowFreeH / d.height;
+          if (best.rows.length <= 2) {
+            return Math.min(fitWScale, Math.max(fitHScale, fitWScale * 0.96));
+          }
+          return Math.min(fitWScale, Math.max(fitHScale, fitWScale * 0.92));
+        } else {
+          // Modo Fit en monitor vertical: que todas las filas quepan exactamente en la altura sin scroll, pero cada una al máximo ancho posible
+          var totalRawH = best.rows.reduce(function (acc, rItem) { return acc + rItem[0].height; }, 0);
+          var availH = H - best.rows.length * (BEZEL + CAPTION) - (best.rows.length - 1) * GAP_Y;
+          return Math.min(fitWScale, availH / totalRawH);
+        }
+      }
+      return rowScales[ri] * relScales[d.id];
+    }
+
     // Posiciones: filas centradas horizontal y verticalmente.
     var rowWidths = best.rows.map(function (row, ri) {
-      var rs = rowScales[ri];
-      return row.reduce(function (a, d) { return a + vW(d) * rs + BEZEL; }, 0) + (row.length - 1) * GAP_X;
+      return row.reduce(function (a, d) {
+        var ds = computeDeviceScale(d, row, ri);
+        return a + d.width * ds + BEZEL;
+      }, 0) + (row.length - 1) * GAP_X;
     });
     var rowHeights = best.rows.map(function (row, ri) {
-      var rs = rowScales[ri];
-      return Math.max.apply(null, row.map(function (d) { return vH(d) * rs; })) + BEZEL + CAPTION;
+      return Math.max.apply(null, row.map(function (d) {
+        var ds = computeDeviceScale(d, row, ri);
+        return d.height * ds;
+      })) + BEZEL + CAPTION;
     });
     var totalW = Math.max.apply(null, rowWidths);
     var totalH = rowHeights.reduce(function (a, b) { return a + b; }, 0) + (best.rows.length - 1) * GAP_Y;
@@ -555,11 +584,11 @@
 
     best.rows.forEach(function (row, ri) {
       var rowW = rowWidths[ri];
-      var rs = rowScales[ri];
       var rowContentH = rowHeights[ri] - BEZEL - CAPTION;
       var x = PAD_X + (areaW - rowW) / 2;
       row.forEach(function (d) {
-        var devScale = rs * relScales[d.id];
+        var devScale = computeDeviceScale(d, row, ri);
+        effectiveZoomSamples.push(devScale);
         var devH = d.height * devScale;
         // Centrar verticalmente cada dispositivo dentro de la altura de su fila
         var offsetY = y + Math.max(0, (rowContentH - devH) / 2);
@@ -568,6 +597,13 @@
       });
       y += rowHeights[ri] + GAP_Y;
     });
+
+    if (effectiveZoomSamples.length) {
+      var avgScale = effectiveZoomSamples.reduce(function (a, b) { return a + b; }, 0) / effectiveZoomSamples.length;
+      setZoom(avgScale);
+    } else {
+      setZoom(s);
+    }
   }
 
   function place(d, x, y, devScale) {
