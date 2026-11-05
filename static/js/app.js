@@ -95,6 +95,7 @@
     lastSeq: 0,
     items: [],
     selectedId: null,
+    userPinned: false,
     activeTab: "request",
     methodFilter: "all",
     deviceFilter: "all",
@@ -1158,13 +1159,13 @@
     trafficRawCode.textContent = trafficState.activeTab === "response" ? selected.raw_response : selected.raw_request;
   }
 
-  function renderTrafficTable() {
+  function renderTrafficTable(scrollToBottom) {
     if (!trafficTbody) return;
     var filtered = trafficState.items.filter(matchesTrafficFilter);
     trafficTbody.innerHTML = "";
     if (trafficEmpty) trafficEmpty.hidden = filtered.length > 0;
 
-    filtered.forEach(function (item) {
+    filtered.forEach(function (item, idx) {
       var tr = document.createElement("tr");
       if (item.id === trafficState.selectedId) tr.className = "is-selected";
 
@@ -1222,12 +1223,21 @@
 
       tr.addEventListener("click", function () {
         trafficState.selectedId = item.id;
-        renderTrafficTable();
+        // Si selecciona la última fila, sigue avanzando automáticamente con las nuevas
+        trafficState.userPinned = idx < filtered.length - 1;
+        renderTrafficTable(false);
         renderTrafficDetail();
       });
 
       trafficTbody.appendChild(tr);
     });
+
+    if (scrollToBottom) {
+      var wrap = trafficTbody.closest(".traffic-table-wrap");
+      if (wrap) {
+        wrap.scrollTop = wrap.scrollHeight;
+      }
+    }
   }
 
   var isFetchingTraffic = false;
@@ -1248,11 +1258,11 @@
         if (trafficCountEl) {
           trafficCountEl.textContent = String(trafficState.items.length);
         }
-        if (!trafficState.selectedId && trafficState.items.length) {
+        if ((!trafficState.selectedId || !trafficState.userPinned) && trafficState.items.length) {
           trafficState.selectedId = trafficState.items[trafficState.items.length - 1].id;
         }
         if (trafficState.open) {
-          renderTrafficTable();
+          renderTrafficTable(true);
           renderTrafficDetail();
         }
       })
@@ -1272,7 +1282,7 @@
     }
     if (trafficState.open) {
       fetchTraffic();
-      renderTrafficTable();
+      renderTrafficTable(true);
       renderTrafficDetail();
     }
     setTimeout(layout, 50);
@@ -1389,7 +1399,7 @@
     });
   }
 
-  setInterval(fetchTraffic, 1500);
+  setInterval(fetchTraffic, 800);
 
   // ---------- Menú Agregar dispositivo ----------
   function buildMenu() {
