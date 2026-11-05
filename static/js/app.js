@@ -23,16 +23,17 @@
   var IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   var MOD = IS_MAC ? "⌘" : "Ctrl";
 
-  var STORE_URL = "rv.url", STORE_DEVICES = "rv.devices", STORE_ZOOM = "rv.zoom";
+  var STORE_URL = "rv.url", STORE_DEVICES = "rv.devices", STORE_ZOOM = "rv.zoom", STORE_SYNC = "rv.sync";
 
   // ---------- Estado ----------
   var state = {
     active: [],        // ids de dispositivos en la mesa, en orden
     url: "",           // URL escrita en Buscar
     frameUrls: {},     // URL actual de cada pantalla (si el usuario navegó dentro)
-    zoomMode: "fit",   // "fit" (automático), "fill" (llenar ancho) o un número fijo
+    zoomMode: "fill",  // "fill" (aprovechar ventana), "fit" (ajustar todo) o un número fijo
     scale: 1,          // zoom que se está mostrando ahora
-    inspector: false   // modo selector de elementos
+    inspector: false,  // modo selector de elementos
+    sync: true         // sincronizar scroll, clics y escritura entre pantallas
   };
   var els = {};        // id -> { root, screen, iframe, placeholder }
 
@@ -52,6 +53,7 @@
   var addBtn = document.getElementById("add-btn");
   var menu = document.getElementById("device-menu");
   var toastEl = document.getElementById("toast");
+  var syncBtn = document.getElementById("sync-btn");
 
   // Elementos del Inspector Docked (no bloqueante)
   var inspectBtn = document.getElementById("inspect-btn");
@@ -152,11 +154,12 @@
     iframe.addEventListener("load", function () {
       root.classList.remove("is-loading");
       hookFrameZoom(iframe);
-      if (state.inspector) {
-        try {
+      try {
+        iframe.contentWindow.postMessage({ type: "rv:set_sync", active: state.sync }, location.origin);
+        if (state.inspector) {
           iframe.contentWindow.postMessage({ type: "rv:set_inspector", active: true }, location.origin);
-        } catch (_e) {}
-      }
+        }
+      } catch (_e) {}
     });
 
     screen.appendChild(placeholder);
@@ -189,7 +192,7 @@
     root.appendChild(caption);
     rack.appendChild(root);
 
-    els[id] = { root: root, screen: screen, iframe: iframe, placeholder: placeholder, remove: remove };
+    els[id] = { root: root, screen: screen, iframe: iframe, placeholder: placeholder, remove: remove, sizeEl: size };
     translateDevice(id);
     requestAnimationFrame(function () {
       requestAnimationFrame(function () { root.classList.remove("is-entering"); });
@@ -243,6 +246,12 @@
   // opción que permite el zoom más grande. Más pantallas = menos zoom.
   // Con zoom manual se conserva ese acomodo y solo cambia la escala;
   // si no cabe, el tapete se puede recorrer con scroll.
+  function minCssH(d) {
+    if (d.kind === "phone") return Math.round(d.width * 1.25);
+    if (d.kind === "tablet") return Math.round(d.width * 0.9);
+    return Math.round(d.width * 0.5);
+  }
+
   function layout() {
     var n = state.active.length;
     matEmpty.hidden = n > 0;
@@ -251,12 +260,13 @@
     if (!n || W <= 0 || H <= 0) {
       rack.style.width = rack.style.height = "";
       updatePanCursor();
-      setZoom(state.zoomMode === "fit" ? 1 : state.zoomMode);
+      setZoom((state.zoomMode === "fit" || state.zoomMode === "fill") ? 1 : state.zoomMode);
       return;
     }
 
     var devices = state.active.map(function (id) { return BY_ID[id]; });
     var best = null;
+    var isFill = state.zoomMode === "fill";
 
     for (var r = 1; r <= n; r++) {
       var per = Math.ceil(n / r);
@@ -264,45 +274,59 @@
       for (var i = 0; i < n; i += per) rows.push(devices.slice(i, i + per));
       if (rows.length !== r) continue;
 
-      var s = 2.0; // Permite aprovechar monitores amplios hasta 200%
-      var sumRowH = 0;
-      rows.forEach(function (row) {
-        var sumW = row.reduce(function (a, d) { return a + d.width; }, 0);
-        var free = W - row.length * BEZEL - (row.length - 1) * GAP_X;
-        s = Math.min(s, free / sumW);
-        sumRowH += Math.max.apply(null, row.map(function (d) { return d.height; }));
-      });
-      var freeH = H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y;
-      s = Math.min(s, freeH / sumRowH);
-
-      if (!best || s > best.s) best = { s: s, rows: rows };
+      if (isFill) {
+        var sFill = 1.5;
+        var freeRowH = Math.max(220, (H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y) / r);
+        rows.forEach(function (row) {
+          var sumW = row.reduce(function (a, d) { return a + d.width; }, 0);
+          var freeW = W - row.length * BEZEL - (row.length - 1) * GAP_X;
+          sFill = Math.min(sFill, freeW / sumW);
+          var maxMinCssH = Math.max.apply(null, row.map(minCssH));
+          sFill = Math.min(sFill, freeRowH / maxMinCssH);
+        });
+        if (!best || sFill > best.s) best = { s: sFill, rows: rows, freeRowH: freeRowH };
+      } else {
+        var sFit = 2.0; // Permite aprovechar monitores amplios hasta 200%
+        var sumRowH = 0;
+        rows.forEach(function (row) {
+          var sumW = row.reduce(function (a, d) { return a + d.width; }, 0);
+          var free = W - row.length * BEZEL - (row.length - 1) * GAP_X;
+          sFit = Math.min(sFit, free / sumW);
+          sumRowH += Math.max.apply(null, row.map(function (d) { return d.height; }));
+        });
+        var freeH = H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y;
+        sFit = Math.min(sFit, freeH / sumRowH);
+        if (!best || sFit > best.s) best = { s: sFit, rows: rows };
+      }
     }
 
     var s;
     if (state.zoomMode === "fit") {
       s = Math.max(ZOOM_MIN / 2, Math.min(2.0, best.s));
     } else if (state.zoomMode === "fill") {
-      // Modo Fill: aprovecha el ancho completo del escenario
-      var maxDevicesRow = best.rows.reduce(function (prev, cur) {
-        var prevW = prev.reduce(function (a, d) { return a + d.width; }, 0);
-        var curW = cur.reduce(function (a, d) { return a + d.width; }, 0);
-        return curW > prevW ? cur : prev;
-      }, best.rows[0]);
-      var totalDevicesW = maxDevicesRow.reduce(function (a, d) { return a + d.width; }, 0);
-      var freeW = W - maxDevicesRow.length * BEZEL - (maxDevicesRow.length - 1) * GAP_X;
-      var fillWScale = totalDevicesW > 0 ? (freeW / totalDevicesW) : 1;
-      s = Math.max(best.s, Math.min(1.5, fillWScale * 0.98));
+      s = Math.max(ZOOM_MIN / 2, Math.min(1.5, best.s));
     } else {
       s = state.zoomMode;
     }
     setZoom(s);
+
+    // En modo Fill cada dispositivo conserva su ancho CSS exacto (para media queries reales)
+    // pero adapta su altura de viewport para aprovechar el 100% del alto disponible sin cortarse.
+    var effHeights = {};
+    devices.forEach(function (d) {
+      if (isFill && best.freeRowH) {
+        effHeights[d.id] = Math.max(minCssH(d), Math.round(best.freeRowH / s));
+      } else {
+        effHeights[d.id] = d.height;
+      }
+    });
 
     // Posiciones: filas centradas horizontal y verticalmente.
     var rowWidths = best.rows.map(function (row) {
       return row.reduce(function (a, d) { return a + d.width * s + BEZEL; }, 0) + (row.length - 1) * GAP_X;
     });
     var rowHeights = best.rows.map(function (row) {
-      return Math.max.apply(null, row.map(function (d) { return d.height * s; })) + BEZEL + CAPTION;
+      return Math.max.apply(null, row.map(function (d) { return effHeights[d.id] * s; })) + BEZEL + CAPTION;
     });
     var totalW = Math.max.apply(null, rowWidths);
     var totalH = rowHeights.reduce(function (a, b) { return a + b; }, 0) + (best.rows.length - 1) * GAP_Y;
@@ -320,18 +344,24 @@
       var rowW = rowWidths[ri];
       var x = PAD_X + (areaW - rowW) / 2;
       row.forEach(function (d) {
-        place(d, x, y, s);
+        place(d, x, y, s, effHeights[d.id]);
         x += d.width * s + BEZEL + GAP_X;
       });
       y += rowHeights[ri] + GAP_Y;
     });
   }
 
-  function place(d, x, y, s) {
+  function place(d, x, y, s, customH) {
     var e = els[d.id];
-    var w = d.width * s, h = d.height * s;
+    var effH = customH || d.height;
+    var w = d.width * s, h = effH * s;
     e.screen.style.width = w + "px";
     e.screen.style.height = h + "px";
+    e.iframe.height = effH;
+    e.iframe.style.height = effH + "px";
+    if (e.sizeEl) {
+      e.sizeEl.textContent = d.width + " × " + effH;
+    }
     e.root.style.width = (w + BEZEL) + "px";
     e.root.style.setProperty("--radius", Math.max(3, RADIUS[d.kind] * s) + "px");
     e.iframe.style.transform = "scale(" + s + ")";
@@ -472,7 +502,14 @@
     state.active.forEach(function (id) {
       var e = els[id];
       if (!e || e.iframe.hidden) return;
-      try { e.iframe.contentWindow.scrollBy({ left: dx, top: dy, behavior: "instant" }); } catch (_e) {}
+      try {
+        e.iframe.contentWindow.postMessage({
+          type: "rv:do_sync_scroll",
+          dx: dx,
+          dy: dy,
+          force: true
+        }, location.origin);
+      } catch (_e) {}
     });
   }
 
@@ -586,14 +623,100 @@
 
   // Las páginas avisan cuando el usuario navega dentro de una pantalla,
   // para que Refrescar recargue la página donde está, no la inicial.
+  // También sincroniza scroll, clics e inputs entre todos los dispositivos simulados.
+  function broadcastToOtherFrames(sourceFrameId, payload) {
+    state.active.forEach(function (id) {
+      if (id === sourceFrameId) return;
+      var item = els[id];
+      if (item && item.iframe && !item.iframe.hidden && item.iframe.contentWindow) {
+        try {
+          item.iframe.contentWindow.postMessage(payload, location.origin);
+        } catch (_e) {}
+      }
+    });
+  }
+
   window.addEventListener("message", function (ev) {
     if (ev.origin !== location.origin || !ev.data) return;
-    if (ev.data.type === "rv:navigated") {
-      if (els[ev.data.frame]) state.frameUrls[ev.data.frame] = ev.data.url;
-    } else if (ev.data.type === "rv:element_picked") {
-      showInspectorData(ev.data);
+    var d = ev.data;
+    if (d.type === "rv:navigated") {
+      if (els[d.frame]) state.frameUrls[d.frame] = d.url;
+    } else if (d.type === "rv:element_picked") {
+      showInspectorData(d);
+    } else if (d.type === "rv:sync_scroll") {
+      if (!state.sync) return;
+      broadcastToOtherFrames(d.frame, {
+        type: "rv:do_sync_scroll",
+        x: d.x,
+        y: d.y,
+        dx: d.dx,
+        dy: d.dy
+      });
+    } else if (d.type === "rv:sync_click") {
+      if (!state.sync) return;
+      broadcastToOtherFrames(d.frame, {
+        type: "rv:do_sync_click",
+        selector: d.selector,
+        structuralSelector: d.structuralSelector,
+        interactiveSelector: d.interactiveSelector,
+        interactiveStructural: d.interactiveStructural,
+        tag: d.tag,
+        text: d.text,
+        href: d.href,
+        absHref: d.absHref
+      });
+    } else if (d.type === "rv:sync_input") {
+      if (!state.sync) return;
+      broadcastToOtherFrames(d.frame, {
+        type: "rv:do_sync_input",
+        eventType: d.eventType,
+        selector: d.selector,
+        structuralSelector: d.structuralSelector,
+        id: d.id,
+        name: d.name,
+        tag: d.tag,
+        value: d.value,
+        checked: d.checked,
+        inputType: d.inputType
+      });
     }
   });
+
+  // ---------- Sincronización Multi-Dispositivo ----------
+  function updateSyncUI() {
+    if (!syncBtn) return;
+    syncBtn.setAttribute("aria-pressed", state.sync ? "true" : "false");
+    syncBtn.classList.toggle("is-active", state.sync);
+  }
+
+  function toggleSync(on, silent) {
+    if (on === undefined) on = !state.sync;
+    state.sync = !!on;
+    store(STORE_SYNC, state.sync);
+    updateSyncUI();
+
+    state.active.forEach(function (id) {
+      var item = els[id];
+      if (item && item.iframe && item.iframe.contentWindow) {
+        try {
+          item.iframe.contentWindow.postMessage({
+            type: "rv:set_sync",
+            active: state.sync
+          }, location.origin);
+        } catch (_e) {}
+      }
+    });
+
+    if (!silent) {
+      toast(state.sync ? t("syncOn") : t("syncOff"));
+    }
+  }
+
+  if (syncBtn) {
+    syncBtn.addEventListener("click", function () {
+      toggleSync();
+    });
+  }
 
   // ---------- Inspector de Elementos ----------
   function formatHtml(raw) {
@@ -871,6 +994,10 @@
     input.value = savedUrl;
     state.active.forEach(function (id) { navigateFrame(id, savedUrl); });
   }
+
+  var savedSync = load(STORE_SYNC);
+  if (typeof savedSync === "boolean") state.sync = savedSync;
+  updateSyncUI();
 
   var savedZoom = load(STORE_ZOOM);
   if (savedZoom === "fit" || savedZoom === "fill") state.zoomMode = savedZoom;

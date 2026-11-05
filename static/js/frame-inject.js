@@ -132,13 +132,17 @@
     (document.body || document.documentElement).appendChild(overlayEl);
   }
 
-  function getSelector(el) {
+  function safeIdent(s) {
+    return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(s) : String(s).replace(/[^A-Za-z0-9_-]/g, "\\$&");
+  }
+
+  function getSelector(el, structuralOnly) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return "";
     var path = [];
     while (el && el.nodeType === Node.ELEMENT_NODE) {
       var name = el.nodeName.toLowerCase();
       if (el.id) {
-        path.unshift(name + "#" + el.id);
+        path.unshift(name + "#" + safeIdent(el.id));
         break;
       }
       var sib = el, nth = 1;
@@ -146,10 +150,16 @@
         if (sib.nodeName.toLowerCase() === name) nth++;
       }
       var part = name;
-      if (nth > 1) part += ":nth-of-type(" + nth + ")";
-      if (el.classList && el.classList.length) {
-        part += "." + el.classList[0];
+      if (!structuralOnly && el.classList && el.classList.length) {
+        for (var i = 0; i < el.classList.length; i++) {
+          var c = el.classList[i];
+          if (/^[A-Za-z_-][A-Za-z0-9_-]*$/.test(c)) {
+            part += "." + c;
+            break;
+          }
+        }
       }
+      if (nth > 1) part += ":nth-of-type(" + nth + ")";
       path.unshift(part);
       el = el.parentElement;
       if (el && el.tagName && el.tagName.toLowerCase() === "body") break;
@@ -218,12 +228,228 @@
   window.addEventListener("mousemove", onInspectMove, true);
   window.addEventListener("click", onInspectClick, true);
 
+  // ---------- Sincronización Multi-Dispositivo (Scroll, Clics, Inputs) ----------
+  var syncActive = true;
+  var isReplayingSync = false;
+  var lastScrollX = window.pageXOffset || document.documentElement.scrollLeft || 0;
+  var lastScrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+  var ignoreScrollUntil = 0;
+
+  function isVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 0 || r.height > 0 || el.offsetParent !== null;
+  }
+
+  function showSyncPulse(el) {
+    if (!el || !el.getBoundingClientRect) return;
+    var r = el.getBoundingClientRect();
+    if (r.width <= 0 && r.height <= 0) return;
+    var sx = window.pageXOffset || document.documentElement.scrollLeft || 0;
+    var sy = window.pageYOffset || document.documentElement.scrollTop || 0;
+    var pulse = document.createElement("div");
+    pulse.style.cssText =
+      "position:absolute;pointer-events:none;z-index:2147483646;" +
+      "border:2px solid #22c55e;background:rgba(34,197,94,0.22);border-radius:4px;" +
+      "box-sizing:border-box;transition:opacity 280ms ease-out,transform 280ms ease-out;" +
+      "top:" + (r.top + sy) + "px;left:" + (r.left + sx) + "px;" +
+      "width:" + r.width + "px;height:" + r.height + "px;";
+    (document.body || document.documentElement).appendChild(pulse);
+    setTimeout(function () {
+      pulse.style.opacity = "0";
+      pulse.style.transform = "scale(1.04)";
+    }, 20);
+    setTimeout(function () {
+      if (pulse.parentNode) pulse.parentNode.removeChild(pulse);
+    }, 320);
+  }
+
+  // 1. Emitir scroll sincronizado desde cualquier pantalla
+  window.addEventListener("scroll", function () {
+    var x = window.pageXOffset || document.documentElement.scrollLeft || 0;
+    var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+    if (!syncActive || Date.now() < ignoreScrollUntil) {
+      lastScrollX = x;
+      lastScrollY = y;
+      return;
+    }
+    var dx = x - lastScrollX;
+    var dy = y - lastScrollY;
+    lastScrollX = x;
+    lastScrollY = y;
+    if (dx === 0 && dy === 0) return;
+
+    try {
+      parent.postMessage({
+        type: "rv:sync_scroll",
+        frame: F,
+        x: x,
+        y: y,
+        dx: dx,
+        dy: dy
+      }, ORIGIN);
+    } catch (_e) {}
+  }, { passive: true });
+
+  // 2. Emitir clics sincronizados
+  window.addEventListener("click", function (e) {
+    if (!syncActive || inspectorActive || isReplayingSync || !e.isTrusted) return;
+    var target = e.target;
+    if (!target || target === overlayEl || (overlayEl && overlayEl.contains(target))) return;
+
+    var interactive = target.closest && target.closest("a, button, [role='button'], input, select, textarea, label, summary");
+    var mainEl = interactive || target;
+    var tag = mainEl.tagName ? mainEl.tagName.toLowerCase() : "";
+    var text = (mainEl.innerText || "").trim().slice(0, 80);
+    var aEl = target.closest && target.closest("a[href]");
+    var href = aEl ? aEl.getAttribute("href") : "";
+    var absHref = aEl ? aEl.href : "";
+
+    try {
+      parent.postMessage({
+        type: "rv:sync_click",
+        frame: F,
+        selector: getSelector(target, false),
+        structuralSelector: getSelector(target, true),
+        interactiveSelector: interactive ? getSelector(interactive, false) : "",
+        interactiveStructural: interactive ? getSelector(interactive, true) : "",
+        tag: tag,
+        text: text,
+        href: href,
+        absHref: absHref
+      }, ORIGIN);
+    } catch (_e) {}
+  }, true);
+
+  // 3. Emitir escritura / cambios en inputs
+  function onSyncInput(e) {
+    if (!syncActive || inspectorActive || isReplayingSync || !e.isTrusted) return;
+    var t = e.target;
+    if (!t || !t.tagName) return;
+    var tag = t.tagName.toLowerCase();
+    if (tag !== "input" && tag !== "textarea" && tag !== "select") return;
+
+    try {
+      parent.postMessage({
+        type: "rv:sync_input",
+        frame: F,
+        eventType: e.type,
+        selector: getSelector(t, false),
+        structuralSelector: getSelector(t, true),
+        id: t.id || "",
+        name: t.name || "",
+        tag: tag,
+        value: t.value,
+        checked: !!t.checked,
+        inputType: (t.type || "").toLowerCase()
+      }, ORIGIN);
+    } catch (_e) {}
+  }
+  window.addEventListener("input", onSyncInput, true);
+  window.addEventListener("change", onSyncInput, true);
+
+  function findSyncedClickElement(d) {
+    var selectors = [d.selector, d.interactiveSelector, d.structuralSelector, d.interactiveStructural];
+    for (var i = 0; i < selectors.length; i++) {
+      var sel = selectors[i];
+      if (!sel) continue;
+      try {
+        var found = document.querySelector(sel);
+        if (found && isVisible(found)) return found;
+      } catch (_e) {}
+    }
+    if (d.href) {
+      try {
+        var links = document.querySelectorAll("a[href]");
+        for (var j = 0; j < links.length; j++) {
+          if (links[j].getAttribute("href") === d.href && isVisible(links[j])) return links[j];
+        }
+      } catch (_e) {}
+    }
+    if (d.tag && d.text) {
+      var candidates = document.querySelectorAll(d.tag);
+      for (var k = 0; k < candidates.length; k++) {
+        var cText = (candidates[k].innerText || "").trim().slice(0, 80);
+        if (cText === d.text && isVisible(candidates[k])) return candidates[k];
+      }
+    }
+    // Último intento aunque no sea visible (p. ej. enlace en menú móvil cerrado)
+    for (var m = 0; m < selectors.length; m++) {
+      if (!selectors[m]) continue;
+      try {
+        var anyEl = document.querySelector(selectors[m]);
+        if (anyEl) return anyEl;
+      } catch (_e) {}
+    }
+    return null;
+  }
+
   window.addEventListener("message", function (e) {
     if (e.origin !== ORIGIN || !e.data) return;
-    if (e.data.type === "rv:set_inspector") {
-      inspectorActive = !!e.data.active;
+    var d = e.data;
+    if (d.type === "rv:set_inspector") {
+      inspectorActive = !!d.active;
       if (!inspectorActive && overlayEl) {
         overlayEl.style.display = "none";
+      }
+    } else if (d.type === "rv:set_sync") {
+      syncActive = !!d.active;
+    } else if (d.type === "rv:do_sync_scroll") {
+      if (!syncActive && !d.force) return;
+      ignoreScrollUntil = Date.now() + 90;
+      if (d.y !== undefined && d.y <= 1) {
+        window.scrollTo(d.x <= 1 ? 0 : (window.pageXOffset + d.dx), 0);
+      } else {
+        window.scrollBy(d.dx, d.dy);
+      }
+      lastScrollX = window.pageXOffset || document.documentElement.scrollLeft || 0;
+      lastScrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+    } else if (d.type === "rv:do_sync_click") {
+      if (!syncActive) return;
+      var el = findSyncedClickElement(d);
+      isReplayingSync = true;
+      try {
+        if (el) {
+          showSyncPulse(el);
+          if (typeof el.focus === "function") el.focus({ preventScroll: true });
+          el.click();
+        } else if (d.absHref && proxiable(d.absHref)) {
+          var here = document.baseURI.split("#")[0];
+          if (d.absHref.split("#")[0] !== here || d.absHref.indexOf("#") === -1) {
+            location.href = via(d.absHref);
+          }
+        }
+      } catch (_e) {}
+      setTimeout(function () { isReplayingSync = false; }, 60);
+    } else if (d.type === "rv:do_sync_input") {
+      if (!syncActive) return;
+      var inp = null;
+      var inpSelectors = [d.selector, d.structuralSelector];
+      for (var i = 0; i < inpSelectors.length; i++) {
+        if (!inpSelectors[i]) continue;
+        try {
+          inp = document.querySelector(inpSelectors[i]);
+          if (inp) break;
+        } catch (_e) {}
+      }
+      if (!inp && d.id) inp = document.getElementById(d.id);
+      if (!inp && d.name) {
+        try { inp = document.querySelector(d.tag + '[name="' + safeIdent(d.name) + '"]'); } catch (_e) {}
+      }
+      if (inp) {
+        isReplayingSync = true;
+        try {
+          if (d.inputType === "checkbox" || d.inputType === "radio") {
+            inp.checked = d.checked;
+          } else {
+            inp.value = d.value;
+          }
+          inp.dispatchEvent(new Event("input", { bubbles: true }));
+          if (d.eventType === "change") {
+            inp.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        } catch (_e) {}
+        setTimeout(function () { isReplayingSync = false; }, 40);
       }
     }
   });

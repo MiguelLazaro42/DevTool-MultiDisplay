@@ -52,7 +52,11 @@
       copySelector: "Copy Selector",
       copiedHtml: "HTML copied to clipboard!",
       copiedSelector: "CSS selector copied!",
-      close: "Close"
+      close: "Close",
+      sync: "Sync",
+      syncHint: "Sync scroll, clicks and typing across all screens",
+      syncOn: "Sync enabled: scroll, clicks and inputs are mirrored",
+      syncOff: "Sync disabled: screens move independently"
     },
     es: {
       screens: "Pantallas",
@@ -101,7 +105,11 @@
       copySelector: "Copiar Selector",
       copiedHtml: "¡HTML copiado al portapapeles!",
       copiedSelector: "¡Selector CSS copiado!",
-      close: "Cerrar"
+      close: "Cerrar",
+      sync: "Sincronizar",
+      syncHint: "Sincronizar scroll, clics y escritura en todas las pantallas",
+      syncOn: "Sincronización activada: scroll, clics y texto",
+      syncOff: "Sincronización desactivada: control independiente"
     }
   };
 

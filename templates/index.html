@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=3">
 </head>
 <body>
   <main class="mat" aria-label="Screens" data-i18n-aria-label="screens">
@@ -34,8 +34,8 @@
         <button type="button" class="zoom-btn" id="zoom-in" aria-label="Zoom in">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 5v10M5 10h10"/></svg>
         </button>
-        <button type="button" class="zoom-fit" id="zoom-fit" aria-pressed="true" data-i18n="zoomFit" data-i18n-title="zoomFitTitle">Fit</button>
-        <button type="button" class="zoom-fit" id="zoom-fill" aria-pressed="false" data-i18n="zoomFill" data-i18n-title="zoomFillTitle">Fill</button>
+        <button type="button" class="zoom-fit" id="zoom-fit" aria-pressed="false" data-i18n="zoomFit" data-i18n-title="zoomFitTitle">Fit</button>
+        <button type="button" class="zoom-fit" id="zoom-fill" aria-pressed="true" data-i18n="zoomFill" data-i18n-title="zoomFillTitle">Fill</button>
       </div>
       <p class="mat-legend">
         <span class="mat-legend-cell" aria-hidden="true"></span>
@@ -117,6 +117,15 @@
       <button type="submit" class="btn btn-quiet" data-i18n="load">Load</button>
     </form>
 
+    <button type="button" class="bar btn btn-sync is-active" id="sync-btn"
+            title="Sync scroll, clicks and typing across all screens"
+            data-i18n-title="syncHint" aria-pressed="true">
+      <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M4 7h11l-3-3M16 13H5l3 3"/>
+      </svg>
+      <span class="btn-sync-text" data-i18n="sync">Sync</span>
+    </button>
+
     <button type="button" class="bar btn btn-inspect" id="inspect-btn"
             title="Inspect an element and copy its code (Cmd/Ctrl+Shift+C)"
             data-i18n-title="inspectHint" aria-pressed="false">
@@ -153,7 +162,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=3"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=3"></script>
 </body>
 </html>
