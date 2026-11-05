@@ -84,6 +84,10 @@
   };
 
   // ---------- fetch y XMLHttpRequest ----------
+  function pingTraffic() {
+    try { parent.postMessage({ type: "rv:traffic_ping", frame: F }, ORIGIN); } catch (_e) {}
+  }
+
   var nativeFetch = window.fetch;
   if (nativeFetch) {
     window.fetch = function (input, init) {
@@ -92,7 +96,11 @@
         var target = abs(isReq ? input.url : String(input));
         if (proxiable(target)) input = isReq ? new Request(via(target), input) : via(target);
       } catch (_e) {}
-      return nativeFetch.call(this, input, init);
+      var p = nativeFetch.call(this, input, init);
+      if (p && typeof p.then === "function") {
+        p.then(pingTraffic, pingTraffic);
+      }
+      return p;
     };
   }
 
@@ -100,6 +108,7 @@
   XMLHttpRequest.prototype.open = function (method, url) {
     var target = abs(url);
     if (proxiable(target)) arguments[1] = via(target);
+    this.addEventListener("loadend", pingTraffic);
     return nativeOpen.apply(this, arguments);
   };
 

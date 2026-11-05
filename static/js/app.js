@@ -68,6 +68,37 @@
   var inspectClose = document.getElementById("inspect-close");
   var copiedPillTimer = null;
 
+  // Elementos del Panel de Tráfico HTTP (estilo Burp Suite)
+  var trafficBtn = document.getElementById("traffic-btn");
+  var trafficCountEl = document.getElementById("traffic-count");
+  var trafficPanel = document.getElementById("traffic-panel");
+  var trafficDot = document.getElementById("traffic-dot");
+  var trafficSearch = document.getElementById("traffic-search");
+  var trafficMethodPills = document.getElementById("traffic-method-pills");
+  var trafficDeviceFilter = document.getElementById("traffic-device-filter");
+  var trafficPauseBtn = document.getElementById("traffic-pause-btn");
+  var trafficClearBtn = document.getElementById("traffic-clear-btn");
+  var trafficCloseBtn = document.getElementById("traffic-close-btn");
+  var trafficTbody = document.getElementById("traffic-tbody");
+  var trafficEmpty = document.getElementById("traffic-empty");
+  var trafficRawCode = document.getElementById("traffic-raw-code");
+  var trafficCopyReq = document.getElementById("traffic-copy-req");
+  var trafficCopyRes = document.getElementById("traffic-copy-res");
+  var trafficCopyCurl = document.getElementById("traffic-copy-curl");
+  var trafficTabs = Array.prototype.slice.call(document.querySelectorAll(".traffic-tab"));
+
+  var trafficState = {
+    open: false,
+    paused: false,
+    lastSeq: 0,
+    items: [],
+    selectedId: null,
+    activeTab: "request",
+    methodFilter: "all",
+    deviceFilter: "all",
+    searchQuery: ""
+  };
+
   // ---------- Utilidades ----------
   function store(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (_e) {}
@@ -151,6 +182,7 @@
     iframe.addEventListener("load", function () {
       root.classList.remove("is-loading");
       hookFrameZoom(iframe);
+      fetchTraffic();
       try {
         iframe.contentWindow.postMessage({ type: "rv:set_sync", active: state.sync }, location.origin);
         if (state.inspector) {
@@ -731,6 +763,9 @@
     var d = ev.data;
     if (d.type === "rv:navigated") {
       if (els[d.frame]) state.frameUrls[d.frame] = d.url;
+      fetchTraffic();
+    } else if (d.type === "rv:traffic_ping") {
+      fetchTraffic();
     } else if (d.type === "rv:element_hover") {
       showInspectorHover(d);
     } else if (d.type === "rv:element_leave") {
@@ -950,6 +985,283 @@
       if (state.inspector) toggleInspector(false);
     }
   });
+
+  // ---------- Tráfico HTTP (Estilo Burp Suite HTTP History) ----------
+  function formatBytes(n) {
+    if (!n || n <= 0) return "0 B";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / (1024 * 1024)).toFixed(2) + " MB";
+  }
+
+  function statusClass(code) {
+    if (code >= 200 && code < 300) return "status-2xx";
+    if (code >= 300 && code < 400) return "status-3xx";
+    if (code >= 400 && code < 500) return "status-4xx";
+    return "status-5xx";
+  }
+
+  function populateTrafficDeviceSelect() {
+    if (!trafficDeviceFilter) return;
+    CATALOG.forEach(function (d) {
+      var opt = document.createElement("option");
+      opt.value = d.id;
+      opt.textContent = d.name;
+      trafficDeviceFilter.appendChild(opt);
+    });
+  }
+
+  function matchesTrafficFilter(item) {
+    if (trafficState.deviceFilter !== "all" && item.device_id !== trafficState.deviceFilter) {
+      return false;
+    }
+    var mf = trafficState.methodFilter;
+    if (mf === "GET" && item.method !== "GET") return false;
+    if (mf === "POST" && item.method !== "POST") return false;
+    if (mf === "MUT" && ["PUT", "PATCH", "DELETE"].indexOf(item.method) === -1) return false;
+    if (mf === "API" && item.mime !== "json" && item.method === "GET") return false;
+
+    if (trafficState.searchQuery) {
+      var q = trafficState.searchQuery.toLowerCase();
+      var hay = (item.url + " " + item.method + " " + item.status + " " + item.device_name + " " + item.mime).toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    return true;
+  }
+
+  function renderTrafficDetail() {
+    if (!trafficRawCode) return;
+    var selected = null;
+    for (var i = 0; i < trafficState.items.length; i++) {
+      if (trafficState.items[i].id === trafficState.selectedId) {
+        selected = trafficState.items[i];
+        break;
+      }
+    }
+    if (!selected) {
+      trafficRawCode.textContent = t("trafficSelectHint");
+      return;
+    }
+    trafficRawCode.textContent = trafficState.activeTab === "response" ? selected.raw_response : selected.raw_request;
+  }
+
+  function renderTrafficTable() {
+    if (!trafficTbody) return;
+    var filtered = trafficState.items.filter(matchesTrafficFilter);
+    trafficTbody.innerHTML = "";
+    if (trafficEmpty) trafficEmpty.hidden = filtered.length > 0;
+
+    filtered.forEach(function (item) {
+      var tr = document.createElement("tr");
+      if (item.id === trafficState.selectedId) tr.className = "is-selected";
+
+      var tdId = document.createElement("td");
+      tdId.className = "col-id";
+      tdId.textContent = "#" + item.id;
+
+      var tdMethod = document.createElement("td");
+      tdMethod.className = "col-method";
+      var mBadge = document.createElement("span");
+      mBadge.className = "method-badge method-" + item.method;
+      mBadge.textContent = item.method;
+      tdMethod.appendChild(mBadge);
+
+      var tdStatus = document.createElement("td");
+      tdStatus.className = "col-status " + statusClass(item.status);
+      tdStatus.textContent = item.status || "ERR";
+
+      var tdDevice = document.createElement("td");
+      tdDevice.className = "col-device";
+      tdDevice.textContent = item.device_name;
+      tdDevice.title = item.device_name;
+
+      var tdHost = document.createElement("td");
+      tdHost.className = "col-host";
+      tdHost.textContent = item.host;
+      tdHost.title = item.host;
+
+      var tdPath = document.createElement("td");
+      tdPath.className = "col-path";
+      tdPath.textContent = item.path;
+      tdPath.title = item.url;
+
+      var tdMime = document.createElement("td");
+      tdMime.className = "col-mime";
+      tdMime.textContent = item.mime;
+
+      var tdSize = document.createElement("td");
+      tdSize.className = "col-size";
+      tdSize.textContent = formatBytes(item.size);
+
+      var tdTime = document.createElement("td");
+      tdTime.className = "col-time";
+      tdTime.textContent = item.duration_ms + " ms";
+
+      tr.appendChild(tdId);
+      tr.appendChild(tdMethod);
+      tr.appendChild(tdStatus);
+      tr.appendChild(tdDevice);
+      tr.appendChild(tdHost);
+      tr.appendChild(tdPath);
+      tr.appendChild(tdMime);
+      tr.appendChild(tdSize);
+      tr.appendChild(tdTime);
+
+      tr.addEventListener("click", function () {
+        trafficState.selectedId = item.id;
+        renderTrafficTable();
+        renderTrafficDetail();
+      });
+
+      trafficTbody.appendChild(tr);
+    });
+  }
+
+  var isFetchingTraffic = false;
+  function fetchTraffic() {
+    if (trafficState.paused || isFetchingTraffic) return;
+    isFetchingTraffic = true;
+    fetch("/api/traffic?since=" + trafficState.lastSeq, { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !Array.isArray(data.items) || !data.items.length) return;
+        data.items.forEach(function (item) {
+          trafficState.items.push(item);
+          if (item.id > trafficState.lastSeq) trafficState.lastSeq = item.id;
+        });
+        if (trafficState.items.length > 400) {
+          trafficState.items = trafficState.items.slice(trafficState.items.length - 400);
+        }
+        if (trafficCountEl) {
+          trafficCountEl.textContent = String(trafficState.items.length);
+        }
+        if (!trafficState.selectedId && trafficState.items.length) {
+          trafficState.selectedId = trafficState.items[trafficState.items.length - 1].id;
+        }
+        if (trafficState.open) {
+          renderTrafficTable();
+          renderTrafficDetail();
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        isFetchingTraffic = false;
+      });
+  }
+
+  function toggleTrafficPanel(on) {
+    if (on === undefined) on = !trafficState.open;
+    trafficState.open = !!on;
+    if (trafficPanel) trafficPanel.hidden = !trafficState.open;
+    if (trafficBtn) {
+      trafficBtn.setAttribute("aria-pressed", trafficState.open ? "true" : "false");
+      trafficBtn.classList.toggle("is-active", trafficState.open);
+    }
+    if (trafficState.open) {
+      fetchTraffic();
+      renderTrafficTable();
+      renderTrafficDetail();
+    }
+    setTimeout(layout, 50);
+  }
+
+  function buildCurl(item) {
+    if (!item) return "";
+    var parts = ["curl -i -X " + item.method + " " + JSON.stringify(item.url)];
+    var hdrs = item.req_headers || {};
+    Object.keys(hdrs).forEach(function (k) {
+      parts.push("  -H " + JSON.stringify(k + ": " + hdrs[k]));
+    });
+    if (item.req_body && item.method !== "GET") {
+      parts.push("  --data-raw " + JSON.stringify(item.req_body));
+    }
+    return parts.join(" \\\n");
+  }
+
+  function getSelectedTrafficItem() {
+    for (var i = 0; i < trafficState.items.length; i++) {
+      if (trafficState.items[i].id === trafficState.selectedId) return trafficState.items[i];
+    }
+    return null;
+  }
+
+  populateTrafficDeviceSelect();
+
+  if (trafficBtn) {
+    trafficBtn.addEventListener("click", function () { toggleTrafficPanel(); });
+  }
+  if (trafficCloseBtn) {
+    trafficCloseBtn.addEventListener("click", function () { toggleTrafficPanel(false); });
+  }
+  if (trafficPauseBtn) {
+    trafficPauseBtn.addEventListener("click", function () {
+      trafficState.paused = !trafficState.paused;
+      trafficPauseBtn.classList.toggle("is-paused", trafficState.paused);
+      trafficPauseBtn.textContent = trafficState.paused ? t("trafficResume") : t("trafficPause");
+      if (trafficDot) trafficDot.classList.toggle("is-paused", trafficState.paused);
+      if (!trafficState.paused) fetchTraffic();
+    });
+  }
+  if (trafficClearBtn) {
+    trafficClearBtn.addEventListener("click", function () {
+      fetch("/api/traffic/clear", { method: "POST", credentials: "same-origin" }).catch(function () {});
+      trafficState.items = [];
+      trafficState.selectedId = null;
+      if (trafficCountEl) trafficCountEl.textContent = "0";
+      renderTrafficTable();
+      renderTrafficDetail();
+    });
+  }
+  if (trafficSearch) {
+    trafficSearch.addEventListener("input", function () {
+      trafficState.searchQuery = trafficSearch.value.trim();
+      renderTrafficTable();
+    });
+  }
+  if (trafficDeviceFilter) {
+    trafficDeviceFilter.addEventListener("change", function () {
+      trafficState.deviceFilter = trafficDeviceFilter.value;
+      renderTrafficTable();
+    });
+  }
+  if (trafficMethodPills) {
+    trafficMethodPills.addEventListener("click", function (ev) {
+      var btn = ev.target.closest(".traffic-pill");
+      if (!btn) return;
+      trafficState.methodFilter = btn.dataset.filter || "all";
+      Array.prototype.slice.call(trafficMethodPills.querySelectorAll(".traffic-pill")).forEach(function (p) {
+        p.classList.toggle("is-active", p === btn);
+      });
+      renderTrafficTable();
+    });
+  }
+  trafficTabs.forEach(function (tabBtn) {
+    tabBtn.addEventListener("click", function () {
+      trafficState.activeTab = tabBtn.dataset.tab || "request";
+      trafficTabs.forEach(function (b) { b.classList.toggle("is-active", b === tabBtn); });
+      renderTrafficDetail();
+    });
+  });
+  if (trafficCopyReq) {
+    trafficCopyReq.addEventListener("click", function () {
+      var item = getSelectedTrafficItem();
+      if (item) copyText(item.raw_request, t("copiedReq"));
+    });
+  }
+  if (trafficCopyRes) {
+    trafficCopyRes.addEventListener("click", function () {
+      var item = getSelectedTrafficItem();
+      if (item) copyText(item.raw_response, t("copiedRes"));
+    });
+  }
+  if (trafficCopyCurl) {
+    trafficCopyCurl.addEventListener("click", function () {
+      var item = getSelectedTrafficItem();
+      if (item) copyText(buildCurl(item), t("copiedCurl"));
+    });
+  }
+
+  setInterval(fetchTraffic, 1500);
 
   // ---------- Menú Agregar dispositivo ----------
   function buildMenu() {

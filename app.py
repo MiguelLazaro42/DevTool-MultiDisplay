@@ -8,6 +8,8 @@ separado por pantalla. /api/reset vacía todos esos frascos.
 """
 
 import argparse
+import collections
+import datetime
 import html
 import json
 import logging
@@ -15,6 +17,7 @@ import os
 import re
 import socket
 import threading
+import time
 import warnings
 import webbrowser
 from urllib.parse import urlparse
@@ -36,6 +39,99 @@ REQUEST_TIMEOUT = 15  # segundos
 # Una sesión de requests (con su propio jar de cookies) por pantalla.
 _sessions = {}
 _sessions_lock = threading.Lock()
+
+# Historial de peticiones HTTP (estilo Burp Suite HTTP History).
+_traffic_log = collections.deque(maxlen=400)
+_traffic_seq = 0
+_traffic_lock = threading.Lock()
+
+
+def _format_body_preview(raw_bytes, content_type, max_chars=12000):
+    if not raw_bytes:
+        return ""
+    ct = (content_type or "").lower()
+    if any(b in ct for b in ("image/", "font/", "audio/", "video/", "application/octet-stream", "application/pdf", "application/zip")):
+        return f"[Contenido binario: {len(raw_bytes)} bytes ({content_type})]"
+    try:
+        text = raw_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return f"[{len(raw_bytes)} bytes]"
+    if "json" in ct or (text.strip().startswith(("{", "[")) and text.strip().endswith(("}", "]"))):
+        try:
+            parsed_json = json.loads(text)
+            text = json.dumps(parsed_json, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+    if len(text) > max_chars:
+        return text[:max_chars] + f"\n\n... [Truncado: {len(text) - max_chars} caracteres más]"
+    return text
+
+
+def _short_mime(content_type, is_doc):
+    ct = (content_type or "").lower()
+    if "json" in ct:
+        return "json"
+    if "html" in ct:
+        return "doc" if is_doc else "html"
+    if "javascript" in ct or "ecmascript" in ct:
+        return "js"
+    if "css" in ct:
+        return "css"
+    if "xml" in ct:
+        return "xml"
+    if "image/" in ct:
+        return "img"
+    if "text/" in ct:
+        return "text"
+    return "other"
+
+
+def record_traffic(device, method, target_url, req_headers, req_body_bytes, status_code, reason, res_headers, res_body_bytes, duration_ms, is_doc):
+    global _traffic_seq
+    parsed = urlparse(target_url)
+    path_query = (parsed.path or "/") + (("?" + parsed.query) if parsed.query else "")
+    req_ct = req_headers.get("Content-Type", "")
+    res_ct = res_headers.get("Content-Type", "") if res_headers else ""
+
+    req_body_str = _format_body_preview(req_body_bytes, req_ct, max_chars=8000)
+    res_body_str = _format_body_preview(res_body_bytes, res_ct, max_chars=12000)
+
+    req_lines = [f"{method} {path_query} HTTP/1.1", f"Host: {parsed.netloc}"]
+    for k, v in req_headers.items():
+        if k.lower() != "host":
+            req_lines.append(f"{k}: {v}")
+    raw_req = "\r\n".join(req_lines) + "\r\n\r\n" + (req_body_str or "")
+
+    res_lines = [f"HTTP/1.1 {status_code} {reason or ''}"]
+    for k, v in (res_headers or {}).items():
+        res_lines.append(f"{k}: {v}")
+    raw_res = "\r\n".join(res_lines) + "\r\n\r\n" + (res_body_str or "")
+
+    with _traffic_lock:
+        _traffic_seq += 1
+        entry = {
+            "id": _traffic_seq,
+            "time": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            "device_id": device["id"],
+            "device_name": device["name"],
+            "method": method,
+            "url": target_url,
+            "host": parsed.netloc,
+            "path": path_query,
+            "status": status_code,
+            "reason": reason or "",
+            "mime": _short_mime(res_ct, is_doc),
+            "content_type": res_ct.split(";")[0].strip() if res_ct else "",
+            "size": len(res_body_bytes) if res_body_bytes else 0,
+            "duration_ms": duration_ms,
+            "req_headers": dict(req_headers),
+            "req_body": req_body_str,
+            "res_headers": dict(res_headers) if res_headers else {},
+            "res_body": res_body_str,
+            "raw_request": raw_req,
+            "raw_response": raw_res,
+        }
+        _traffic_log.append(entry)
 
 # Cabeceras de la respuesta original que no se reenvían al navegador.
 DROPPED_HEADERS = {
@@ -159,22 +255,40 @@ def proxy():
         headers["Origin"] = site
         headers["Referer"] = site + "/"
 
+    is_document = request.headers.get("Sec-Fetch-Dest", "iframe") in ("iframe", "frame", "document")
+    t0 = time.time()
+
     try:
         upstream = get_session(frame_id).request(
             request.method, url, headers=headers, data=data,
             timeout=REQUEST_TIMEOUT, allow_redirects=True,
         )
     except requests.exceptions.Timeout:
+        dur = round((time.time() - t0) * 1000)
+        record_traffic(device, request.method, url, headers, data, 504, "Gateway Timeout", {}, b"", dur, is_document)
         return error_page("timeout", url)
     except requests.exceptions.RequestException as exc:
+        dur = round((time.time() - t0) * 1000)
+        record_traffic(device, request.method, url, headers, data, 502, exc.__class__.__name__, {}, b"", dur, is_document)
         return error_page("connect", url, name=exc.__class__.__name__)
 
+    dur = round((time.time() - t0) * 1000)
     content_type = upstream.headers.get("Content-Type", "")
     body = upstream.content
 
-    # Solo se inyecta en documentos que se van a mostrar en una pantalla; un
-    # fragmento HTML pedido con fetch (por ejemplo htmx) se deja intacto.
-    is_document = request.headers.get("Sec-Fetch-Dest", "iframe") in ("iframe", "frame", "document")
+    record_traffic(
+        device,
+        request.method,
+        upstream.url or url,
+        headers,
+        data,
+        upstream.status_code,
+        upstream.reason,
+        upstream.headers,
+        body,
+        dur,
+        is_document,
+    )
 
     if "text/html" in content_type and is_document:
         if "charset" not in content_type.lower():
@@ -215,6 +329,21 @@ def reset():
     for name in request.cookies:
         resp.delete_cookie(name)
     return resp
+
+
+@app.route("/api/traffic", methods=["GET"])
+def api_traffic():
+    since = request.args.get("since", 0, type=int)
+    with _traffic_lock:
+        items = [e for e in _traffic_log if e["id"] > since]
+    return jsonify({"items": items})
+
+
+@app.route("/api/traffic/clear", methods=["POST"])
+def api_traffic_clear():
+    with _traffic_lock:
+        _traffic_log.clear()
+    return jsonify({"ok": True})
 
 
 def find_free_port(preferred, attempts=20):

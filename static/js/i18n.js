@@ -59,7 +59,23 @@
       sync: "Sync",
       syncHint: "Sync scroll, clicks and typing across all screens",
       syncOn: "Sync enabled: scroll, clicks and inputs are mirrored",
-      syncOff: "Sync disabled: screens move independently"
+      syncOff: "Sync disabled: screens move independently",
+      traffic: "HTTP Traffic",
+      trafficHint: "Inspect HTTP requests and responses (Burp-style HTTP History)",
+      trafficTitle: "HTTP History",
+      trafficFilterPlaceholder: "Filter by URL, host, method or status…",
+      trafficAllDevices: "All devices",
+      trafficPause: "Pause",
+      trafficResume: "Resume",
+      trafficClear: "Clear",
+      trafficCopyReq: "Copy Request",
+      trafficCopyRes: "Copy Response",
+      trafficCopyCurl: "Copy as cURL",
+      trafficEmpty: "No HTTP requests captured yet.",
+      trafficSelectHint: "Select any request from the table to inspect its raw HTTP Request & Response.",
+      copiedReq: "Raw HTTP Request copied!",
+      copiedRes: "Raw HTTP Response copied!",
+      copiedCurl: "cURL command copied!"
     },
     es: {
       screens: "Pantallas",
@@ -115,7 +131,23 @@
       sync: "Sincronizar",
       syncHint: "Sincronizar scroll, clics y escritura en todas las pantallas",
       syncOn: "Sincronización activada: scroll, clics y texto",
-      syncOff: "Sincronización desactivada: control independiente"
+      syncOff: "Sincronización desactivada: control independiente",
+      traffic: "Peticiones",
+      trafficHint: "Ver historial de peticiones y respuestas HTTP (estilo Burp Suite)",
+      trafficTitle: "Historial HTTP",
+      trafficFilterPlaceholder: "Filtrar por URL, host, método o status…",
+      trafficAllDevices: "Todos los dispositivos",
+      trafficPause: "Pausar",
+      trafficResume: "Reanudar",
+      trafficClear: "Limpiar",
+      trafficCopyReq: "Copiar Request",
+      trafficCopyRes: "Copiar Response",
+      trafficCopyCurl: "Copiar cURL",
+      trafficEmpty: "Aún no hay peticiones HTTP capturadas.",
+      trafficSelectHint: "Selecciona una petición de la tabla para inspeccionar su Request y Response crudo.",
+      copiedReq: "¡HTTP Request copiado!",
+      copiedRes: "¡HTTP Response copiado!",
+      copiedCurl: "¡Comando cURL copiado!"
     }
   };
 

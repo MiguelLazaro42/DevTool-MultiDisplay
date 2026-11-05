@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=6">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=7">
 </head>
 <body>
   <main class="mat" aria-label="Screens" data-i18n-aria-label="screens">
@@ -80,6 +80,81 @@
     </div>
   </main>
 
+  <!-- Panel de Tráfico HTTP estilo Burp Suite (HTTP History) -->
+  <section class="traffic-panel" id="traffic-panel" aria-label="HTTP History" hidden>
+    <header class="traffic-toolbar">
+      <div class="traffic-brand">
+        <span class="traffic-dot" id="traffic-dot" aria-hidden="true"></span>
+        <span class="traffic-title" data-i18n="trafficTitle">Historial HTTP</span>
+      </div>
+
+      <div class="traffic-filters">
+        <input type="search" id="traffic-search" class="traffic-search-input"
+               placeholder="Filtrar por URL, host, método o status…"
+               data-i18n-placeholder="trafficFilterPlaceholder" spellcheck="false">
+        <div class="traffic-method-pills" id="traffic-method-pills" role="group">
+          <button type="button" class="traffic-pill is-active" data-filter="all">All</button>
+          <button type="button" class="traffic-pill" data-filter="GET">GET</button>
+          <button type="button" class="traffic-pill" data-filter="POST">POST</button>
+          <button type="button" class="traffic-pill" data-filter="MUT">PUT/DEL</button>
+          <button type="button" class="traffic-pill" data-filter="API">JSON/API</button>
+        </div>
+        <select id="traffic-device-filter" class="traffic-device-select">
+          <option value="all" data-i18n="trafficAllDevices">Todos los dispositivos</option>
+        </select>
+      </div>
+
+      <div class="traffic-actions">
+        <button type="button" class="traffic-btn" id="traffic-pause-btn" data-i18n="trafficPause">Pausar</button>
+        <button type="button" class="traffic-btn" id="traffic-clear-btn" data-i18n="trafficClear">Limpiar</button>
+        <button type="button" class="traffic-btn-icon" id="traffic-close-btn" aria-label="Cerrar" data-i18n-aria-label="close">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="traffic-split">
+      <!-- Tabla de peticiones HTTP -->
+      <div class="traffic-table-wrap">
+        <table class="traffic-table">
+          <thead>
+            <tr>
+              <th class="col-id">#</th>
+              <th class="col-method">Method</th>
+              <th class="col-status">Status</th>
+              <th class="col-device">Device</th>
+              <th class="col-host">Host</th>
+              <th class="col-path">Endpoint / Path</th>
+              <th class="col-mime">MIME</th>
+              <th class="col-size">Size</th>
+              <th class="col-time">Time</th>
+            </tr>
+          </thead>
+          <tbody id="traffic-tbody"></tbody>
+        </table>
+        <div class="traffic-empty" id="traffic-empty" data-i18n="trafficEmpty">Aún no hay peticiones HTTP capturadas.</div>
+      </div>
+
+      <!-- Visor Request / Response estilo Burp Suite -->
+      <div class="traffic-detail">
+        <div class="traffic-detail-bar">
+          <div class="traffic-tabs" role="tablist">
+            <button type="button" class="traffic-tab is-active" data-tab="request" role="tab">Request</button>
+            <button type="button" class="traffic-tab" data-tab="response" role="tab">Response</button>
+          </div>
+          <div class="traffic-detail-actions">
+            <button type="button" class="traffic-chip" id="traffic-copy-req" data-i18n="trafficCopyReq">Copiar Request</button>
+            <button type="button" class="traffic-chip" id="traffic-copy-res" data-i18n="trafficCopyRes">Copiar Response</button>
+            <button type="button" class="traffic-chip traffic-chip-accent" id="traffic-copy-curl" data-i18n="trafficCopyCurl">Copiar cURL</button>
+          </div>
+        </div>
+        <div class="traffic-raw-wrap">
+          <pre class="traffic-raw" id="traffic-raw"><code id="traffic-raw-code" data-i18n="trafficSelectHint">Selecciona una petición de la tabla para inspeccionar su Request y Response crudo.</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <footer class="ruler">
     <form class="bar bar-search" id="search-form" role="search" novalidate>
       <label class="visually-hidden" for="url-input" data-i18n="searchLabel">Page address</label>
@@ -113,6 +188,17 @@
       <span class="btn-inspect-text" data-i18n="inspect">Inspect</span>
     </button>
 
+    <button type="button" class="bar btn btn-traffic" id="traffic-btn"
+            title="Inspect HTTP requests and responses (Burp-style HTTP History)"
+            data-i18n-title="trafficHint" aria-pressed="false">
+      <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M3 6h14M3 10h10M3 14h7"/>
+        <circle cx="15.5" cy="13.5" r="2.5"/>
+      </svg>
+      <span class="btn-traffic-text" data-i18n="traffic">Peticiones</span>
+      <span class="traffic-badge" id="traffic-count">0</span>
+    </button>
+
     <button type="button" class="bar btn btn-refresh" id="refresh-btn"
             title="Reload every screen and clear its cookies" data-i18n-title="refreshTitle">
       <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.76-4.24"/><path d="M16 3.5v3.2h-3.2"/></svg>
@@ -135,7 +221,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=6"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=6"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=7"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=7"></script>
 </body>
 </html>
