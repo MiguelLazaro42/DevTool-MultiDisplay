@@ -10,12 +10,12 @@
   var I18N = window.RV_I18N;
   var t = I18N.t;
 
-  // Medidas del acomodo (en px de pantalla, no se escalan).
-  var PAD_X = 32, PAD_TOP = 32, PAD_BOTTOM = 48;
-  var GAP_X = 40, GAP_Y = 28;
-  var BEZEL = 12;          // 6 px por lado
-  var CAPTION = 44;        // nombre + medidas (2 líneas) debajo de cada pantalla
-  var RADIUS = { phone: 46, tablet: 20, desktop: 6 };
+  // Medidas del acomodo (optimizadas para mayor aprovechamiento del espacio)
+  var PAD_X = 16, PAD_TOP = 16, PAD_BOTTOM = 22;
+  var GAP_X = 20, GAP_Y = 16;
+  var BEZEL = 8;           // marco compacto (4 px por lado)
+  var CAPTION = 28;        // etiqueta compacta
+  var RADIUS = { phone: 44, tablet: 18, desktop: 6 };
 
   // Zoom propio del visor (no el de Chrome). Pasos como los de Chrome.
   var ZOOM_STEPS = [0.1, 0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
@@ -30,13 +30,14 @@
     active: [],        // ids de dispositivos en la mesa, en orden
     url: "",           // URL escrita en Buscar
     frameUrls: {},     // URL actual de cada pantalla (si el usuario navegó dentro)
-    zoomMode: "fit",   // "fit" (automático) o un número fijo, p. ej. 0.5
+    zoomMode: "fit",   // "fit" (automático), "fill" (llenar ancho) o un número fijo
     scale: 1,          // zoom que se está mostrando ahora
     inspector: false   // modo selector de elementos
   };
   var els = {};        // id -> { root, screen, iframe, placeholder }
 
   // ---------- Elementos ----------
+  var matEl = document.querySelector(".mat");
   var stage = document.getElementById("stage");
   var rack = document.getElementById("rack");
   var matEmpty = document.getElementById("mat-empty");
@@ -44,6 +45,7 @@
   var zoomInBtn = document.getElementById("zoom-in");
   var zoomOutBtn = document.getElementById("zoom-out");
   var zoomFitBtn = document.getElementById("zoom-fit");
+  var zoomFillBtn = document.getElementById("zoom-fill");
   var form = document.getElementById("search-form");
   var input = document.getElementById("url-input");
   var refreshBtn = document.getElementById("refresh-btn");
@@ -51,15 +53,19 @@
   var menu = document.getElementById("device-menu");
   var toastEl = document.getElementById("toast");
 
-  // Elementos del Inspector
+  // Elementos del Inspector Docked (no bloqueante)
   var inspectBtn = document.getElementById("inspect-btn");
-  var inspectModal = document.getElementById("inspect-modal");
+  var inspectPanel = document.getElementById("inspect-panel");
+  var inspectEmpty = document.getElementById("inspect-empty");
+  var inspectDetails = document.getElementById("inspect-details");
   var inspectBadge = document.getElementById("inspect-badge");
+  var inspectDim = document.getElementById("inspect-dim");
   var inspectSelector = document.getElementById("inspect-selector");
   var inspectCode = document.getElementById("inspect-code");
   var inspectClose = document.getElementById("inspect-close");
   var inspectCopyHtml = document.getElementById("inspect-copy-html");
   var inspectCopySelector = document.getElementById("inspect-copy-selector");
+  var inspectAutoCopy = document.getElementById("inspect-autocopy");
   var currentInspectedHtml = "";
   var currentInspectedSelector = "";
 
@@ -258,7 +264,7 @@
       for (var i = 0; i < n; i += per) rows.push(devices.slice(i, i + per));
       if (rows.length !== r) continue;
 
-      var s = 1;
+      var s = 2.0; // Permite aprovechar monitores amplios hasta 200%
       var sumRowH = 0;
       rows.forEach(function (row) {
         var sumW = row.reduce(function (a, d) { return a + d.width; }, 0);
@@ -272,7 +278,23 @@
       if (!best || s > best.s) best = { s: s, rows: rows };
     }
 
-    var s = state.zoomMode === "fit" ? Math.max(ZOOM_MIN / 2, best.s) : state.zoomMode;
+    var s;
+    if (state.zoomMode === "fit") {
+      s = Math.max(ZOOM_MIN / 2, Math.min(2.0, best.s));
+    } else if (state.zoomMode === "fill") {
+      // Modo Fill: aprovecha el ancho completo del escenario
+      var maxDevicesRow = best.rows.reduce(function (prev, cur) {
+        var prevW = prev.reduce(function (a, d) { return a + d.width; }, 0);
+        var curW = cur.reduce(function (a, d) { return a + d.width; }, 0);
+        return curW > prevW ? cur : prev;
+      }, best.rows[0]);
+      var totalDevicesW = maxDevicesRow.reduce(function (a, d) { return a + d.width; }, 0);
+      var freeW = W - maxDevicesRow.length * BEZEL - (maxDevicesRow.length - 1) * GAP_X;
+      var fillWScale = totalDevicesW > 0 ? (freeW / totalDevicesW) : 1;
+      s = Math.max(best.s, Math.min(1.5, fillWScale * 0.98));
+    } else {
+      s = state.zoomMode;
+    }
     setZoom(s);
 
     // Posiciones: filas centradas horizontal y verticalmente.
@@ -341,6 +363,10 @@
     var s = state.scale;
     zoomLabel.textContent = t("zoomValue", { n: Math.round(s * 100) });
     zoomFitBtn.setAttribute("aria-pressed", state.zoomMode === "fit" ? "true" : "false");
+    if (zoomFillBtn) {
+      zoomFillBtn.setAttribute("aria-pressed", state.zoomMode === "fill" ? "true" : "false");
+      zoomFillBtn.title = t("zoomFillTitle");
+    }
     zoomOutBtn.disabled = s <= ZOOM_MIN + 0.001;
     zoomInBtn.disabled = s >= ZOOM_MAX - 0.001;
     var label;
@@ -354,7 +380,7 @@
   var zoomingTimer;
   function applyZoom(mode, anchor) {
     var before = state.scale;
-    if (mode !== "fit") mode = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, mode));
+    if (mode !== "fit" && mode !== "fill") mode = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, mode));
     state.zoomMode = mode;
     store(STORE_ZOOM, mode);
 
@@ -386,9 +412,15 @@
     stage.scrollLeft = stage.scrollTop = 0;
   }
 
+  function fillZoom() {
+    applyZoom("fill");
+    stage.scrollLeft = stage.scrollTop = 0;
+  }
+
   zoomInBtn.addEventListener("click", function () { stepZoom(1); });
   zoomOutBtn.addEventListener("click", function () { stepZoom(-1); });
   zoomFitBtn.addEventListener("click", fitZoom);
+  if (zoomFillBtn) zoomFillBtn.addEventListener("click", fillZoom);
 
   // ⌘/Ctrl + y ⌘/Ctrl − hacen zoom en el visor en lugar de en Chrome.
   function onZoomKey(ev) {
@@ -486,7 +518,6 @@
         toggleInspector();
       } else if (ev.key === "Escape") {
         if (state.inspector) toggleInspector(false);
-        closeInspectorModal();
       }
     }, true);
     w.addEventListener("wheel", function (ev) {
@@ -560,7 +591,7 @@
     if (ev.data.type === "rv:navigated") {
       if (els[ev.data.frame]) state.frameUrls[ev.data.frame] = ev.data.url;
     } else if (ev.data.type === "rv:element_picked") {
-      showInspectorModal(ev.data);
+      showInspectorData(ev.data);
     }
   });
 
@@ -616,9 +647,20 @@
   function toggleInspector(on) {
     if (on === undefined) on = !state.inspector;
     state.inspector = on;
+
+    if (matEl) {
+      matEl.classList.toggle("has-inspector", state.inspector);
+    }
     if (inspectBtn) {
       inspectBtn.setAttribute("aria-pressed", state.inspector ? "true" : "false");
       inspectBtn.classList.toggle("is-active", state.inspector);
+    }
+    if (inspectPanel) {
+      inspectPanel.hidden = !state.inspector;
+      if (!state.inspector) {
+        if (inspectEmpty) inspectEmpty.hidden = false;
+        if (inspectDetails) inspectDetails.hidden = true;
+      }
     }
 
     state.active.forEach(function (id) {
@@ -636,21 +678,31 @@
     if (state.inspector) {
       toast(t("inspectActive"));
     }
+    // Re-acomodar las pantallas al cambiar el ancho del escenario
+    setTimeout(layout, 60);
   }
 
-  function closeInspectorModal() {
-    if (inspectModal) inspectModal.hidden = true;
-  }
-
-  function showInspectorModal(data) {
+  function closeInspectorPanel() {
     toggleInspector(false);
+  }
+
+  function showInspectorData(data) {
+    // Flujo ágil continuo: ¡Mantiene el inspector activo!
     currentInspectedHtml = data.html || "";
     currentInspectedSelector = data.selector || "";
 
     if (inspectBadge) inspectBadge.textContent = "<" + (data.tag || "element") + ">";
+    if (inspectDim) inspectDim.textContent = (data.width && data.height) ? (data.width + "×" + data.height + " px") : "";
     if (inspectSelector) inspectSelector.textContent = data.selector || "";
     if (inspectCode) inspectCode.textContent = formatHtml(data.html || "");
-    if (inspectModal) inspectModal.hidden = false;
+
+    if (inspectEmpty) inspectEmpty.hidden = true;
+    if (inspectDetails) inspectDetails.hidden = false;
+
+    // Si Auto-copiar está activado, copia de inmediato al portapapeles sin pasos extra
+    if (inspectAutoCopy && inspectAutoCopy.checked) {
+      copyText(currentInspectedHtml, t("copiedHtml"));
+    }
   }
 
   if (inspectBtn) {
@@ -659,12 +711,7 @@
     });
   }
   if (inspectClose) {
-    inspectClose.addEventListener("click", closeInspectorModal);
-  }
-  if (inspectModal) {
-    inspectModal.addEventListener("click", function (e) {
-      if (e.target === inspectModal) closeInspectorModal();
-    });
+    inspectClose.addEventListener("click", closeInspectorPanel);
   }
   if (inspectCopyHtml) {
     inspectCopyHtml.addEventListener("click", function () {
@@ -683,7 +730,6 @@
       toggleInspector();
     } else if (ev.key === "Escape") {
       if (state.inspector) toggleInspector(false);
-      closeInspectorModal();
     }
   });
 
@@ -827,7 +873,8 @@
   }
 
   var savedZoom = load(STORE_ZOOM);
-  if (typeof savedZoom === "number" && savedZoom >= ZOOM_MIN && savedZoom <= ZOOM_MAX) state.zoomMode = savedZoom;
+  if (savedZoom === "fit" || savedZoom === "fill") state.zoomMode = savedZoom;
+  else if (typeof savedZoom === "number" && savedZoom >= ZOOM_MIN && savedZoom <= ZOOM_MAX) state.zoomMode = savedZoom;
 
   layout();
   if (window.ResizeObserver) new ResizeObserver(layout).observe(stage);

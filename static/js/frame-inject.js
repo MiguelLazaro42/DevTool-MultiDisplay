@@ -196,8 +196,7 @@
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    if (overlayEl) overlayEl.style.display = "none";
-
+    var r = target.getBoundingClientRect();
     var tag = target.tagName.toLowerCase();
     var selector = getSelector(target);
     var html = target.outerHTML;
@@ -209,7 +208,9 @@
         device: D,
         tag: tag,
         selector: selector,
-        html: html
+        html: html,
+        width: Math.round(r.width),
+        height: Math.round(r.height)
       }, ORIGIN);
     } catch (_e) {}
   }
