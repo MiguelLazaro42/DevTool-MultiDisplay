@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=5">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=6">
 </head>
 <body>
   <main class="mat" aria-label="Screens" data-i18n-aria-label="screens">
@@ -62,7 +62,17 @@
         <span class="inspect-dim-badge" id="inspect-dim">0×0</span>
         <span class="inspect-copied-pill" id="inspect-copied-pill" data-i18n="inspectCopiedBadge" hidden>✓ ¡Copiado!</span>
       </div>
-      <div class="inspect-float-selector" id="inspect-selector"></div>
+      <div class="inspect-float-meta">
+        <div class="inspect-float-row">
+          <span class="inspect-meta-key">link:</span>
+          <span class="inspect-meta-val" id="inspect-link"></span>
+        </div>
+        <div class="inspect-float-row">
+          <span class="inspect-meta-key">selector:</span>
+          <span class="inspect-meta-val inspect-meta-selector" id="inspect-selector"></span>
+        </div>
+      </div>
+      <div class="inspect-float-element-label">element:</div>
       <pre class="inspect-float-code"><code id="inspect-code"></code></pre>
       <div class="inspect-float-footer">
         <span class="inspect-float-hint" data-i18n="inspectFloatHint">Clic para copiar elemento · Esc para salir</span>
@@ -125,7 +135,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=5"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=5"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=6"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=6"></script>
 </body>
 </html>

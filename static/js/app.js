@@ -62,6 +62,7 @@
   var inspectCopiedPill = document.getElementById("inspect-copied-pill");
   var inspectBadge = document.getElementById("inspect-badge");
   var inspectDim = document.getElementById("inspect-dim");
+  var inspectLink = document.getElementById("inspect-link");
   var inspectSelector = document.getElementById("inspect-selector");
   var inspectCode = document.getElementById("inspect-code");
   var inspectClose = document.getElementById("inspect-close");
@@ -880,8 +881,10 @@
     var item = els[data.frame];
     if (!item || !item.iframe) return;
 
+    var endpoint = data.url || state.frameUrls[data.frame] || state.url || "";
     if (inspectBadge) inspectBadge.textContent = "<" + (data.tag || "element") + ">";
     if (inspectDim) inspectDim.textContent = (data.width && data.height) ? (data.width + "×" + data.height + " px") : "";
+    if (inspectLink) inspectLink.textContent = endpoint;
     if (inspectSelector) inspectSelector.textContent = data.selector || "";
     if (inspectCode) inspectCode.textContent = data.foldedHtml || "";
 
@@ -910,8 +913,10 @@
 
   function onInspectorPicked(data) {
     if (!state.inspector) return;
-    // Al dar clic se copia el elemento completo al portapapeles sin salir del modo inspección
-    copyText(data.html || "", t("copiedHtml"));
+    var endpoint = data.url || state.frameUrls[data.frame] || state.url || "";
+    var payload = "link: " + endpoint + "\nelement: " + (data.html || "");
+    // Al dar clic se copia el endpoint (link:) y el elemento completo (element:) al portapapeles sin salir del modo inspección
+    copyText(payload, t("copiedHtml"));
 
     if (inspectFloat) {
       inspectFloat.classList.add("is-copied");

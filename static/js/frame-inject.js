@@ -104,8 +104,28 @@
   };
 
   // ---------- Aviso al visor ----------
-  // Para que Refrescar recargue la página donde está esta pantalla.
-  try { parent.postMessage({ type: "rv:navigated", frame: F, url: document.baseURI }, ORIGIN); } catch (_e) {}
+  // Para que Refrescar recargue la página donde está esta pantalla, y para obtener el endpoint actual.
+  function getCurrentPageUrl() {
+    try {
+      var base = document.baseURI || "";
+      if (location.pathname && location.pathname !== "/proxy") {
+        return new URL(location.pathname + location.search + location.hash, base).href;
+      }
+      if (location.hash && base.indexOf("#") === -1) {
+        return base + location.hash;
+      }
+      return base;
+    } catch (_e) {
+      return document.baseURI || location.href;
+    }
+  }
+
+  function notifyNavigated() {
+    try { parent.postMessage({ type: "rv:navigated", frame: F, url: getCurrentPageUrl() }, ORIGIN); } catch (_e) {}
+  }
+  notifyNavigated();
+  window.addEventListener("hashchange", notifyNavigated);
+  window.addEventListener("popstate", notifyNavigated);
 
   // ---------- Inspector de Elementos ----------
   var inspectorActive = false;
@@ -270,6 +290,7 @@
         type: "rv:element_hover",
         frame: F,
         device: D,
+        url: getCurrentPageUrl(),
         tag: label,
         selector: getSelector(target),
         foldedHtml: buildFoldedPreview(target),
@@ -320,6 +341,7 @@
         type: "rv:element_picked",
         frame: F,
         device: D,
+        url: getCurrentPageUrl(),
         tag: tag,
         selector: selector,
         html: html,
