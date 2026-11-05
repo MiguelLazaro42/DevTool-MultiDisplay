@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=22">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=23">
 </head>
 <body>
   <main class="mat" aria-label="Screens" data-i18n-aria-label="screens">
@@ -435,6 +435,16 @@
         </svg>
         <span data-i18n="snapshotBtn">Captura</span>
       </button>
+      <button type="button" class="btn btn-cert" id="cert-btn"
+              title="Configurar certificado cliente (.p12 / .pfx) para autenticar los visualizadores en sitios de desarrollo"
+              data-i18n-title="certHint" aria-pressed="false">
+        <span class="cert-status-dot" id="cert-status-dot" aria-hidden="true"></span>
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <rect x="4.5" y="9" width="11" height="8" rx="1.6"/>
+          <path d="M7 9V6.5a3 3 0 0 1 6 0V9"/>
+        </svg>
+        <span id="cert-btn-label" data-i18n="certBtn">.p12</span>
+      </button>
     </div>
 
     <button type="button" class="bar btn btn-refresh" id="refresh-btn"
@@ -454,6 +464,64 @@
       <div class="device-menu" id="device-menu" role="menu" aria-label="Devices" data-i18n-aria-label="devicesMenu" hidden></div>
     </div>
   </footer>
+
+  <!-- Modal de Certificado Cliente (.p12 / .pfx) para mTLS en Desarrollo -->
+  <div class="ai-modal-backdrop" id="cert-modal" hidden>
+    <div class="ai-modal cert-modal-box" role="dialog" aria-modal="true" aria-labelledby="cert-modal-title">
+      <header class="ai-modal-header">
+        <div class="ai-modal-title-wrap">
+          <span class="ai-modal-badge" id="cert-modal-badge">mTLS / .p12</span>
+          <h2 id="cert-modal-title" class="ai-modal-title">Certificado Cliente (.p12 / .pfx) para Visualizadores</h2>
+        </div>
+        <button type="button" class="traffic-btn-icon" id="cert-modal-close" aria-label="Cerrar">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
+        </button>
+      </header>
+
+      <div class="cert-modal-body">
+        <div class="cert-active-banner" id="cert-active-banner" hidden>
+          <div class="cert-active-header">
+            <span class="cert-active-pill">ACTIVO</span>
+            <strong id="cert-active-filename">certificado.p12</strong>
+          </div>
+          <div class="cert-active-meta" id="cert-active-meta"></div>
+        </div>
+
+        <div class="cert-form-group">
+          <label class="cert-label" for="cert-file-input">1. Seleccionar archivo de certificado (.p12 o .pfx)</label>
+          <input type="file" id="cert-file-input" class="cert-input-file" accept=".p12,.pfx,application/x-pkcs12">
+          <span class="cert-help">Opcionalmente puedes escribir la ruta local del archivo en tu Mac:</span>
+          <input type="text" id="cert-path-input" class="cert-input-text" placeholder="/Users/.../certificado.p12" spellcheck="false">
+        </div>
+
+        <div class="cert-form-group">
+          <label class="cert-label" for="cert-pass-input">2. Contraseña del certificado (.p12)</label>
+          <input type="password" id="cert-pass-input" class="cert-input-text" placeholder="Contraseña del archivo .p12 (déjalo vacío si no tiene)">
+        </div>
+
+        <div class="cert-form-checks">
+          <label class="ai-toggle-chip">
+            <input type="checkbox" id="cert-proxy-assets" checked>
+            <span>Enrutar todos los recursos del sitio (HTML, CSS, JS, imágenes, API) con el certificado .p12</span>
+          </label>
+          <label class="ai-toggle-chip">
+            <input type="checkbox" id="cert-allow-self-signed" checked>
+            <span>Permitir certificados SSL autofirmados en el servidor de desarrollo</span>
+          </label>
+        </div>
+
+        <div class="cert-error-box" id="cert-error-box" hidden></div>
+      </div>
+
+      <footer class="ai-modal-footer">
+        <span class="ai-modal-hint">El certificado se guarda localmente en <code>.certs/</code> (ignorado por Git).</span>
+        <div class="ai-modal-actions">
+          <button type="button" class="traffic-btn" id="cert-remove-btn" hidden>Quitar certificado</button>
+          <button type="button" class="traffic-btn traffic-btn-ai" id="cert-apply-btn">Activar certificado y recargar</button>
+        </div>
+      </footer>
+    </div>
+  </div>
 
   <!-- Modal de Reporte de Contexto (copia en 1 clic + personalización + captura PNG) -->
   <div class="ai-modal-backdrop" id="ai-report-modal" hidden>
@@ -495,7 +563,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=22"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=22"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=23"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=23"></script>
 </body>
 </html>

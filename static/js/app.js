@@ -156,6 +156,23 @@
   var aiModalCopyBtn = document.getElementById("ai-modal-copy-btn");
   var aiModalSnapshotBtn = document.getElementById("ai-modal-snapshot-btn");
 
+  // Modal de Certificado Cliente (.p12 / .pfx)
+  var certBtn = document.getElementById("cert-btn");
+  var certBtnLabel = document.getElementById("cert-btn-label");
+  var certModal = document.getElementById("cert-modal");
+  var certModalClose = document.getElementById("cert-modal-close");
+  var certActiveBanner = document.getElementById("cert-active-banner");
+  var certActiveFilename = document.getElementById("cert-active-filename");
+  var certActiveMeta = document.getElementById("cert-active-meta");
+  var certFileInput = document.getElementById("cert-file-input");
+  var certPathInput = document.getElementById("cert-path-input");
+  var certPassInput = document.getElementById("cert-pass-input");
+  var certProxyAssets = document.getElementById("cert-proxy-assets");
+  var certAllowSelfSigned = document.getElementById("cert-allow-self-signed");
+  var certErrorBox = document.getElementById("cert-error-box");
+  var certApplyBtn = document.getElementById("cert-apply-btn");
+  var certRemoveBtn = document.getElementById("cert-remove-btn");
+
   var trafficState = {
     open: false,
     panelMode: "traffic",
@@ -4160,6 +4177,176 @@
     fetchFlow();
     fetchAudit();
   }, 900);
+
+  // ---------- Certificado Cliente (.p12 / .pfx) para mTLS en Desarrollo ----------
+  var certState = { active: false, filename: "" };
+
+  function renderCertState(cert) {
+    certState = cert || { active: false };
+    var isActive = !!certState.active;
+    if (certBtn) {
+      certBtn.classList.toggle("is-active", isActive);
+      certBtn.setAttribute("aria-pressed", isActive ? "true" : "false");
+    }
+    if (certBtnLabel) {
+      certBtnLabel.textContent = isActive ? (certState.filename || ".p12") : ".p12";
+    }
+    if (certActiveBanner) {
+      certActiveBanner.hidden = !isActive;
+    }
+    if (certActiveFilename) {
+      certActiveFilename.textContent = certState.filename || "certificado.p12";
+    }
+    if (certActiveMeta) {
+      var metaLines = [];
+      if (certState.subject) metaLines.push("Subject: " + certState.subject);
+      if (certState.issuer) metaLines.push("Issuer: " + certState.issuer);
+      if (certState.not_after) metaLines.push("Expira: " + certState.not_after);
+      certActiveMeta.textContent = metaLines.join(" | ");
+    }
+    if (certRemoveBtn) {
+      certRemoveBtn.hidden = !isActive;
+    }
+    if (certProxyAssets && typeof certState.proxy_assets === "boolean") {
+      certProxyAssets.checked = certState.proxy_assets;
+    }
+    if (certAllowSelfSigned && typeof certState.verify_ssl === "boolean") {
+      certAllowSelfSigned.checked = !certState.verify_ssl;
+    }
+  }
+
+  function fetchCertStatus() {
+    fetch("/api/cert", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (data && data.cert) renderCertState(data.cert);
+      })
+      .catch(function () {});
+  }
+
+  function reloadAllFramesForCert() {
+    if (!state.url) return;
+    state.active.forEach(function (id) {
+      navigateFrame(id, state.frameUrls[id] || state.url, true);
+    });
+  }
+
+  if (certBtn) {
+    certBtn.addEventListener("click", function () {
+      if (certErrorBox) certErrorBox.hidden = true;
+      fetchCertStatus();
+      if (certModal) certModal.hidden = false;
+    });
+  }
+  if (certModalClose) {
+    certModalClose.addEventListener("click", function () {
+      if (certModal) certModal.hidden = true;
+    });
+  }
+  if (certModal) {
+    certModal.addEventListener("click", function (ev) {
+      if (ev.target === certModal) certModal.hidden = true;
+    });
+  }
+
+  if (certApplyBtn) {
+    certApplyBtn.addEventListener("click", function () {
+      if (certErrorBox) certErrorBox.hidden = true;
+      var file = certFileInput && certFileInput.files && certFileInput.files[0];
+      var pathVal = certPathInput ? certPathInput.value.trim() : "";
+      var passVal = certPassInput ? certPassInput.value : "";
+      var verifySsl = certAllowSelfSigned ? !certAllowSelfSigned.checked : false;
+      var proxyAssets = certProxyAssets ? !!certProxyAssets.checked : true;
+
+      var reqPromise;
+      if (file) {
+        var fd = new FormData();
+        fd.append("file", file);
+        fd.append("password", passVal);
+        fd.append("verify_ssl", verifySsl ? "true" : "false");
+        fd.append("proxy_assets", proxyAssets ? "true" : "false");
+        reqPromise = fetch("/api/cert", {
+          method: "POST",
+          credentials: "same-origin",
+          body: fd
+        });
+      } else if (pathVal) {
+        reqPromise = fetch("/api/cert", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            path: pathVal,
+            password: passVal,
+            verify_ssl: verifySsl,
+            proxy_assets: proxyAssets
+          })
+        });
+      } else if (certState.active) {
+        reqPromise = fetch("/api/cert", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            verify_ssl: verifySsl,
+            proxy_assets: proxyAssets
+          })
+        });
+      } else {
+        if (certErrorBox) {
+          certErrorBox.textContent = "Selecciona un archivo .p12 / .pfx o escribe su ruta local.";
+          certErrorBox.hidden = false;
+        }
+        return;
+      }
+
+      certApplyBtn.disabled = true;
+      reqPromise
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          certApplyBtn.disabled = false;
+          if (!res || !res.ok) {
+            if (certErrorBox) {
+              certErrorBox.textContent = (res && res.error) || "Error al procesar el certificado .p12.";
+              certErrorBox.hidden = false;
+            }
+            return;
+          }
+          renderCertState(res.cert);
+          if (certModal) certModal.hidden = true;
+          toast(t("certActivated"));
+          reloadAllFramesForCert();
+          postCrossTab({ type: "bc:reload" });
+        })
+        .catch(function () {
+          certApplyBtn.disabled = false;
+          if (certErrorBox) {
+            certErrorBox.textContent = "No se pudo conectar con el servidor local para activar el certificado.";
+            certErrorBox.hidden = false;
+          }
+        });
+    });
+  }
+
+  if (certRemoveBtn) {
+    certRemoveBtn.addEventListener("click", function () {
+      fetch("/api/cert/clear", { method: "POST", credentials: "same-origin" })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (res && res.cert) renderCertState(res.cert);
+          if (certFileInput) certFileInput.value = "";
+          if (certPathInput) certPathInput.value = "";
+          if (certPassInput) certPassInput.value = "";
+          if (certModal) certModal.hidden = true;
+          toast(t("certRemoved"));
+          reloadAllFramesForCert();
+          postCrossTab({ type: "bc:reload" });
+        })
+        .catch(function () {});
+    });
+  }
+
+  fetchCertStatus();
 
   // ---------- Menú Agregar dispositivo ----------
   function buildMenu() {

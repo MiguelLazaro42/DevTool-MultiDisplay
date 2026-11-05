@@ -15,28 +15,256 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
+import ssl
+import subprocess
+import tempfile
 import threading
 import time
 import warnings
 import webbrowser
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 # El Python que trae macOS usa LibreSSL y urllib3 avisa al arrancar; no
 # afecta al visor, así que no mostramos ese aviso a los usuarios.
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
 import requests  # noqa: E402
+import urllib3  # noqa: E402
 from flask import Flask, Response, jsonify, render_template, request
 from flask import cli as flask_cli
 
 from devices import DEFAULT_DEVICE_IDS, DEVICES, DEVICES_BY_ID
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB máx para certificados .p12
 
 REQUEST_TIMEOUT = 15  # segundos
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CERTS_DIR = os.path.join(BASE_DIR, ".certs")
+ACTIVE_PEM_PATH = os.path.join(CERTS_DIR, "active_client_cert.pem")
+ACTIVE_META_PATH = os.path.join(CERTS_DIR, "active_cert.json")
+
+_cert_lock = threading.Lock()
+_cert_state = {
+    "active": False,
+    "filename": "",
+    "pem_path": "",
+    "subject": "",
+    "issuer": "",
+    "not_before": "",
+    "not_after": "",
+    "verify_ssl": False,
+    "proxy_assets": True,
+    "updated_at": "",
+}
+
+
+def _find_openssl_bin():
+    if os.path.isfile("/usr/bin/openssl") and os.access("/usr/bin/openssl", os.X_OK):
+        return "/usr/bin/openssl"
+    return shutil.which("openssl") or "openssl"
+
+
+def _run_openssl_pkcs12(openssl_bin, p12_path, extra_args, password):
+    env = dict(os.environ)
+    env["RV_P12_PASS"] = password or ""
+    cmd = [openssl_bin, "pkcs12", "-in", p12_path] + extra_args + ["-passin", "env:RV_P12_PASS"]
+    res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=10)
+    if res.returncode != 0:
+        # Reintentar con -legacy por si el binario es OpenSSL 3.x y el .p12 usa cifrado clásico RC2/3DES
+        cmd_legacy = [openssl_bin, "pkcs12", "-legacy", "-in", p12_path] + extra_args + ["-passin", "env:RV_P12_PASS"]
+        res_leg = subprocess.run(cmd_legacy, capture_output=True, text=True, env=env, timeout=10)
+        if res_leg.returncode == 0:
+            return res_leg
+    return res
+
+
+def _extract_cert_metadata(openssl_bin, pem_path):
+    meta = {"subject": "", "issuer": "", "not_before": "", "not_after": ""}
+    try:
+        res = subprocess.run(
+            [openssl_bin, "x509", "-in", pem_path, "-noout", "-subject", "-issuer", "-dates"],
+            capture_output=True, text=True, timeout=6,
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                line_s = line.strip()
+                if line_s.startswith("subject="):
+                    meta["subject"] = line_s[len("subject="):].strip()
+                elif line_s.startswith("issuer="):
+                    meta["issuer"] = line_s[len("issuer="):].strip()
+                elif line_s.startswith("notBefore="):
+                    meta["not_before"] = line_s[len("notBefore="):].strip()
+                elif line_s.startswith("notAfter="):
+                    meta["not_after"] = line_s[len("notAfter="):].strip()
+    except Exception:
+        pass
+    return meta
+
+
+def _reset_all_sessions():
+    with _sessions_lock:
+        for sess in _sessions.values():
+            try:
+                sess.close()
+            except Exception:
+                pass
+        _sessions.clear()
+
+
+def install_p12_certificate(p12_bytes, password="", filename="certificado.p12", verify_ssl=False, proxy_assets=True):
+    """Convierte un certificado cliente .p12/.pfx a PEM unificado, valida el par
+    llave/certificado con ssl.SSLContext y lo activa para todas las pantallas."""
+    os.makedirs(CERTS_DIR, mode=0o700, exist_ok=True)
+    openssl_bin = _find_openssl_bin()
+
+    fd, tmp_p12 = tempfile.mkstemp(prefix="upload_", suffix=".p12", dir=CERTS_DIR)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(p12_bytes)
+        os.chmod(tmp_p12, 0o600)
+
+        # 1. Extraer certificado de cliente (hoja)
+        cl_res = _run_openssl_pkcs12(openssl_bin, tmp_p12, ["-clcerts", "-nokeys"], password)
+        if cl_res.returncode != 0:
+            err_msg = (cl_res.stderr or cl_res.stdout or "").strip()
+            if "mac verify failure" in err_msg.lower() or "bad decrypt" in err_msg.lower() or "invalid password" in err_msg.lower():
+                raise ValueError("Contraseña del certificado .p12 incorrecta.")
+            raise ValueError(f"No se pudo leer el archivo .p12 ({err_msg[:180] or 'formato inválido'}).")
+
+        cl_pem = cl_res.stdout or ""
+        ca_pem = ""
+        if "-----BEGIN CERTIFICATE-----" in cl_pem:
+            ca_res = _run_openssl_pkcs12(openssl_bin, tmp_p12, ["-cacerts", "-nokeys"], password)
+            if ca_res.returncode == 0 and "-----BEGIN CERTIFICATE-----" in (ca_res.stdout or ""):
+                ca_pem = ca_res.stdout
+        else:
+            # Algunos .p12 generados en Windows/Java no etiquetan el bag como clcerts
+            all_certs_res = _run_openssl_pkcs12(openssl_bin, tmp_p12, ["-nokeys"], password)
+            cl_pem = all_certs_res.stdout or ""
+
+        # 2. Extraer llave privada sin cifrar (-nodes) para que urllib3/requests pueda usarla sin prompt interactivo
+        pk_res = _run_openssl_pkcs12(openssl_bin, tmp_p12, ["-nocerts", "-nodes"], password)
+        pk_pem = pk_res.stdout or ""
+
+        if "-----BEGIN CERTIFICATE-----" not in cl_pem:
+            raise ValueError("El archivo .p12 no contiene ningún certificado X.509.")
+        if "PRIVATE KEY-----" not in pk_pem:
+            raise ValueError("El archivo .p12 no contiene una llave privada válida.")
+
+        combined_pem = cl_pem.strip() + "\n"
+        if ca_pem.strip():
+            combined_pem += ca_pem.strip() + "\n"
+        combined_pem += pk_pem.strip() + "\n"
+
+        with open(ACTIVE_PEM_PATH, "w", encoding="utf-8") as pf:
+            pf.write(combined_pem)
+        os.chmod(ACTIVE_PEM_PATH, 0o600)
+
+        # 3. Validar que el motor SSL de Python pueda cargar la cadena y la llave privada
+        test_ctx = ssl.create_default_context()
+        test_ctx.load_cert_chain(certfile=ACTIVE_PEM_PATH)
+
+        meta = _extract_cert_metadata(openssl_bin, ACTIVE_PEM_PATH)
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        with _cert_lock:
+            _cert_state.update({
+                "active": True,
+                "filename": os.path.basename(filename or "certificado.p12"),
+                "pem_path": ACTIVE_PEM_PATH,
+                "subject": meta["subject"],
+                "issuer": meta["issuer"],
+                "not_before": meta["not_before"],
+                "not_after": meta["not_after"],
+                "verify_ssl": bool(verify_ssl),
+                "proxy_assets": bool(proxy_assets),
+                "updated_at": now_str,
+            })
+            saved_meta = {k: v for k, v in _cert_state.items() if k != "pem_path"}
+            with open(ACTIVE_META_PATH, "w", encoding="utf-8") as mf:
+                json.dump(saved_meta, mf, ensure_ascii=False, indent=2)
+
+        _reset_all_sessions()
+        return get_public_cert_state()
+    finally:
+        try:
+            if os.path.exists(tmp_p12):
+                os.remove(tmp_p12)
+        except Exception:
+            pass
+
+
+def load_persisted_certificate():
+    """Carga el certificado .p12 previamente guardado en .certs/ al iniciar el servidor."""
+    if not os.path.isfile(ACTIVE_PEM_PATH) or not os.path.isfile(ACTIVE_META_PATH):
+        return
+    try:
+        test_ctx = ssl.create_default_context()
+        test_ctx.load_cert_chain(certfile=ACTIVE_PEM_PATH)
+        with open(ACTIVE_META_PATH, encoding="utf-8") as mf:
+            meta = json.load(mf)
+        with _cert_lock:
+            _cert_state.update({
+                "active": True,
+                "filename": meta.get("filename", "certificado.p12"),
+                "pem_path": ACTIVE_PEM_PATH,
+                "subject": meta.get("subject", ""),
+                "issuer": meta.get("issuer", ""),
+                "not_before": meta.get("not_before", ""),
+                "not_after": meta.get("not_after", ""),
+                "verify_ssl": bool(meta.get("verify_ssl", False)),
+                "proxy_assets": bool(meta.get("proxy_assets", True)),
+                "updated_at": meta.get("updated_at", ""),
+            })
+    except Exception:
+        pass
+
+
+def clear_active_certificate():
+    with _cert_lock:
+        _cert_state.update({
+            "active": False,
+            "filename": "",
+            "pem_path": "",
+            "subject": "",
+            "issuer": "",
+            "not_before": "",
+            "not_after": "",
+            "updated_at": "",
+        })
+    for p in (ACTIVE_PEM_PATH, ACTIVE_META_PATH):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+    _reset_all_sessions()
+
+
+def get_public_cert_state():
+    with _cert_lock:
+        return {
+            "active": _cert_state["active"],
+            "filename": _cert_state["filename"],
+            "subject": _cert_state["subject"],
+            "issuer": _cert_state["issuer"],
+            "not_before": _cert_state["not_before"],
+            "not_after": _cert_state["not_after"],
+            "verify_ssl": _cert_state["verify_ssl"],
+            "proxy_assets": _cert_state["proxy_assets"],
+            "updated_at": _cert_state["updated_at"],
+        }
+
+
+load_persisted_certificate()
 
 # Una sesión de requests (con su propio jar de cookies) por pantalla.
 _sessions = {}
@@ -191,6 +419,95 @@ META_CSP_RE = re.compile(
 )
 HEAD_OPEN_RE = re.compile(r"<head(\s[^>]*)?>", re.I)
 
+ASSET_TAG_RE = re.compile(
+    r"<(?:script|link|img|source|video|audio)\b[^>]*>",
+    re.I,
+)
+SRC_HREF_ATTR_RE = re.compile(
+    r"(\b(?:src|href)\s*=\s*)([\"'])([^\"']+)\2",
+    re.I,
+)
+INTEGRITY_ATTR_RE = re.compile(r"\s+\b(?:integrity|crossorigin)\s*=\s*(?:[\"'][^\"']*[\"']|[^\s>]+)", re.I)
+CSS_URL_RE = re.compile(r"url\(\s*([\"']?)([^\"')]+)\1\s*\)", re.I)
+
+
+def _same_site_host(host_a, host_b):
+    if not host_a or not host_b:
+        return False
+    ha = host_a.split(":")[0].lower().strip(".")
+    hb = host_b.split(":")[0].lower().strip(".")
+    if ha == hb:
+        return True
+    parts_a = ha.split(".")
+    parts_b = hb.split(".")
+    if len(parts_a) >= 2 and len(parts_b) >= 2:
+        if parts_a[-2:] == parts_b[-2:]:
+            return True
+    return False
+
+
+def _build_proxy_asset_url(abs_url, frame_id, device_id):
+    return f"/proxy?frame={quote(frame_id, safe='')}&device={quote(device_id, safe='')}&url={quote(abs_url, safe='')}"
+
+
+def _rewrite_html_assets_for_proxy(html_text, base_url, frame_id, device_id):
+    """Cuando hay un certificado .p12 activo, reescribe los recursos del mismo
+    sitio (<script src>, <link href>, <img src>, <source src>) para que pasen
+    también por /proxy presentando el certificado cliente."""
+    parsed_base = urlparse(base_url)
+    base_host = parsed_base.hostname or ""
+
+    def _repl_tag(tag_match):
+        tag_str = tag_match.group(0)
+        tag_lower = tag_str.lower()
+        if tag_lower.startswith("<link") and not any(rel in tag_lower for rel in ("stylesheet", "preload", "modulepreload", "icon", "manifest")):
+            return tag_str
+        rewritten_any = [False]
+
+        def _repl_attr(attr_match):
+            attr_prefix, quote_ch, raw_val = attr_match.group(1), attr_match.group(2), attr_match.group(3).strip()
+            if not raw_val or raw_val.startswith(("data:", "blob:", "javascript:", "mailto:", "tel:", "about:", "#", "/proxy?")):
+                return attr_match.group(0)
+            abs_target = urljoin(base_url, raw_val)
+            parsed_target = urlparse(abs_target)
+            if parsed_target.scheme not in ("http", "https"):
+                return attr_match.group(0)
+            if not _same_site_host(base_host, parsed_target.hostname or ""):
+                return attr_match.group(0)
+            rewritten_any[0] = True
+            proxied = _build_proxy_asset_url(abs_target, frame_id, device_id)
+            return f"{attr_prefix}{quote_ch}{html.escape(proxied, quote=True)}{quote_ch}"
+
+        new_tag = SRC_HREF_ATTR_RE.sub(_repl_attr, tag_str)
+        if rewritten_any[0]:
+            new_tag = INTEGRITY_ATTR_RE.sub("", new_tag)
+        return new_tag
+
+    return ASSET_TAG_RE.sub(_repl_tag, html_text)
+
+
+def _rewrite_css_urls_for_proxy(css_text, base_url, frame_id, device_id):
+    """Reescribe url(...) dentro de archivos CSS servidos por /proxy cuando hay
+    certificado .p12 activo (para fuentes web e imágenes de fondo)."""
+    parsed_base = urlparse(base_url)
+    base_host = parsed_base.hostname or ""
+
+    def _repl(match):
+        quote_ch, raw_val = match.group(1), match.group(2).strip()
+        if not raw_val or raw_val.startswith(("data:", "blob:", "#", "/proxy?")):
+            return match.group(0)
+        abs_target = urljoin(base_url, raw_val)
+        parsed_target = urlparse(abs_target)
+        if parsed_target.scheme not in ("http", "https"):
+            return match.group(0)
+        if not _same_site_host(base_host, parsed_target.hostname or ""):
+            return match.group(0)
+        proxied = _build_proxy_asset_url(abs_target, frame_id, device_id)
+        q = quote_ch or '"'
+        return f"url({q}{proxied}{q})"
+
+    return CSS_URL_RE.sub(_repl, css_text)
+
 
 def get_session(frame_id):
     with _sessions_lock:
@@ -198,18 +515,29 @@ def get_session(frame_id):
         if session is None:
             session = requests.Session()
             _sessions[frame_id] = session
+        with _cert_lock:
+            if _cert_state["active"] and _cert_state["pem_path"] and os.path.isfile(_cert_state["pem_path"]):
+                session.cert = _cert_state["pem_path"]
+                session.verify = bool(_cert_state["verify_ssl"])
+            else:
+                session.cert = None
+                session.verify = True
         return session
 
 
 FRAME_INJECT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "js", "frame-inject.js")
 
 
-def frame_script(frame_id, device_id):
+def frame_script(frame_id, device_id, cert_proxy_assets=False):
     """Script que se inyecta en cada página para que enlaces, formularios y
     peticiones sigan pasando por el proxy (ver static/js/frame-inject.js)."""
     with open(FRAME_INJECT_PATH, encoding="utf-8") as f:
         source = f.read()
-    source = source.replace("__FRAME__", json.dumps(frame_id)).replace("__DEVICE__", json.dumps(device_id))
+    source = (
+        source.replace("__FRAME__", json.dumps(frame_id))
+        .replace("__DEVICE__", json.dumps(device_id))
+        .replace("__CERT_ACTIVE__", "true" if cert_proxy_assets else "false")
+    )
     return "<script>" + source.replace("</", "<\\/") + "</script>"
 
 
@@ -291,16 +619,19 @@ def proxy():
         if name.lower().startswith("x-") and not name.lower().startswith("x-forwarded"):
             headers[name] = value
 
+    site = f"{parsed.scheme}://{parsed.netloc}"
     data = None
     if request.method != "GET":
         data = request.get_data()
         # Muchos sitios rechazan un POST (login, CSRF) si Origin/Referer no son
         # los suyos. El navegador mandaría los del visor, así que ponemos los del sitio.
-        site = f"{parsed.scheme}://{parsed.netloc}"
         headers["Origin"] = site
         headers["Referer"] = site + "/"
+    else:
+        headers["Referer"] = site + "/"
 
-    is_document = request.headers.get("Sec-Fetch-Dest", "iframe") in ("iframe", "frame", "document")
+    sec_dest = request.headers.get("Sec-Fetch-Dest", "")
+    is_document = sec_dest in ("iframe", "frame", "document", "") and request.method == "GET"
     t0 = time.time()
 
     try:
@@ -335,19 +666,30 @@ def proxy():
         is_document,
     )
 
-    if "text/html" in content_type and is_document:
+    with _cert_lock:
+        cert_proxy_assets = bool(_cert_state["active"] and _cert_state["proxy_assets"])
+
+    if "text/html" in content_type.lower() and is_document:
         if "charset" not in content_type.lower():
             # Sin charset en la cabecera, requests asume ISO-8859-1; mejor adivinar.
             upstream.encoding = upstream.apparent_encoding or "utf-8"
         text = upstream.text
         text = META_CSP_RE.sub("", text)
-        injection = f'<base href="{html.escape(upstream.url, quote=True)}">' + frame_script(frame_id, device["id"])
+        if cert_proxy_assets:
+            text = _rewrite_html_assets_for_proxy(text, upstream.url or url, frame_id, device["id"])
+        injection = f'<base href="{html.escape(upstream.url, quote=True)}">' + frame_script(frame_id, device["id"], cert_proxy_assets=cert_proxy_assets)
         if HEAD_OPEN_RE.search(text):
             text = HEAD_OPEN_RE.sub(lambda m: m.group(0) + injection, text, count=1)
         else:
             text = injection + text
         body = text.encode("utf-8")
         content_type = "text/html; charset=utf-8"
+    elif "text/css" in content_type.lower() and cert_proxy_assets:
+        if "charset" not in content_type.lower():
+            upstream.encoding = upstream.apparent_encoding or "utf-8"
+        css_text = _rewrite_css_urls_for_proxy(upstream.text, upstream.url or url, frame_id, device["id"])
+        body = css_text.encode("utf-8")
+        content_type = "text/css; charset=utf-8"
 
     resp = Response(body, status=upstream.status_code)
     for name, value in upstream.headers.items():
@@ -355,6 +697,7 @@ def proxy():
             resp.headers[name] = value
     resp.headers["Content-Type"] = content_type or "application/octet-stream"
     resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
 
@@ -693,6 +1036,79 @@ def api_templates():
     return jsonify({"items": items})
 
 
+@app.route("/api/cert", methods=["GET", "POST"])
+def api_cert():
+    if request.method == "GET":
+        return jsonify({"ok": True, "cert": get_public_cert_state()})
+
+    # POST: subir nuevo archivo .p12/.pfx, indicar ruta local o actualizar opciones
+    if request.files and "file" in request.files:
+        f = request.files["file"]
+        raw_bytes = f.read()
+        if not raw_bytes:
+            return jsonify({"ok": False, "error": "El archivo .p12 seleccionado está vacío."}), 400
+        password = request.form.get("password", "")
+        verify_ssl = request.form.get("verify_ssl", "false").lower() in ("true", "1", "yes", "on")
+        proxy_assets = request.form.get("proxy_assets", "true").lower() in ("true", "1", "yes", "on")
+        try:
+            cert_info = install_p12_certificate(
+                raw_bytes,
+                password=password,
+                filename=f.filename or "certificado.p12",
+                verify_ssl=verify_ssl,
+                proxy_assets=proxy_assets,
+            )
+            return jsonify({"ok": True, "cert": cert_info})
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Error al procesar el certificado: {exc}"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    local_path = (payload.get("path") or "").strip()
+    if local_path:
+        expanded = os.path.expanduser(local_path)
+        if not os.path.isfile(expanded):
+            return jsonify({"ok": False, "error": f"No se encontró el archivo en la ruta: {local_path}"}), 400
+        try:
+            with open(expanded, "rb") as lf:
+                raw_bytes = lf.read()
+            cert_info = install_p12_certificate(
+                raw_bytes,
+                password=payload.get("password", ""),
+                filename=os.path.basename(expanded),
+                verify_ssl=bool(payload.get("verify_ssl", False)),
+                proxy_assets=bool(payload.get("proxy_assets", True)),
+            )
+            return jsonify({"ok": True, "cert": cert_info})
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"Error al cargar el archivo .p12: {exc}"}), 400
+
+    # Actualizar solo flags (verify_ssl / proxy_assets) si ya hay un certificado activo
+    with _cert_lock:
+        if "verify_ssl" in payload:
+            _cert_state["verify_ssl"] = bool(payload["verify_ssl"])
+        if "proxy_assets" in payload:
+            _cert_state["proxy_assets"] = bool(payload["proxy_assets"])
+        if _cert_state["active"] and os.path.isfile(ACTIVE_META_PATH):
+            try:
+                saved_meta = {k: v for k, v in _cert_state.items() if k != "pem_path"}
+                with open(ACTIVE_META_PATH, "w", encoding="utf-8") as mf:
+                    json.dump(saved_meta, mf, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+    _reset_all_sessions()
+    return jsonify({"ok": True, "cert": get_public_cert_state()})
+
+
+@app.route("/api/cert/clear", methods=["POST"])
+def api_cert_clear():
+    clear_active_certificate()
+    return jsonify({"ok": True, "cert": get_public_cert_state()})
+
+
 def find_free_port(preferred, attempts=20):
     """Devuelve el primer puerto libre a partir de `preferred`."""
     for port in range(preferred, preferred + attempts):
@@ -713,7 +1129,21 @@ def main():
                         help="don't open the browser automatically")
     parser.add_argument("--debug", action="store_true",
                         help="reload the server when the code changes (for development)")
+    parser.add_argument("--cert", type=str, default=os.environ.get("RV_CERT_P12", ""),
+                        help="path to a client .p12/.pfx certificate for mTLS development sites")
+    parser.add_argument("--cert-pass", type=str, default=os.environ.get("RV_CERT_PASS", ""),
+                        help="password for the .p12/.pfx certificate")
     args = parser.parse_args()
+
+    if args.cert:
+        cert_file = os.path.expanduser(args.cert)
+        if os.path.isfile(cert_file):
+            try:
+                with open(cert_file, "rb") as cf:
+                    install_p12_certificate(cf.read(), password=args.cert_pass, filename=os.path.basename(cert_file))
+                print(f"  Loaded client certificate: {cert_file}", flush=True)
+            except Exception as exc:
+                print(f"  Warning: could not load certificate {cert_file}: {exc}", flush=True)
 
     # Con --debug, Flask arranca el servidor dos veces (el segundo proceso
     # trae WERKZEUG_RUN_MAIN): solo el primero busca puerto y abre el navegador.

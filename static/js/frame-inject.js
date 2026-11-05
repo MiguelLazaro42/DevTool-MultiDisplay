@@ -10,6 +10,7 @@
 (function () {
   "use strict";
   var F = __FRAME__, D = __DEVICE__;
+  var CERT_ACTIVE = (typeof __CERT_ACTIVE__ !== "undefined") ? !!__CERT_ACTIVE__ : false;
   var ORIGIN = location.origin;
 
   function abs(u) {
@@ -21,6 +22,51 @@
   function via(u) {
     return ORIGIN + "/proxy?frame=" + encodeURIComponent(F) +
       "&device=" + encodeURIComponent(D) + "&url=" + encodeURIComponent(u);
+  }
+
+  function isSameSiteAsset(u) {
+    if (!proxiable(u)) return false;
+    try {
+      var baseHost = new URL(document.baseURI).hostname.toLowerCase();
+      var targetHost = new URL(u).hostname.toLowerCase();
+      if (baseHost === targetHost) return true;
+      var bp = baseHost.split(".");
+      var tp = targetHost.split(".");
+      if (bp.length >= 2 && tp.length >= 2 && bp.slice(-2).join(".") === tp.slice(-2).join(".")) {
+        return true;
+      }
+    } catch (_e) {}
+    return false;
+  }
+
+  if (CERT_ACTIVE && typeof MutationObserver === "function") {
+    var certAssetObs = new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) {
+        var added = mutations[i].addedNodes;
+        if (!added) continue;
+        for (var j = 0; j < added.length; j++) {
+          var node = added[j];
+          if (!node || node.nodeType !== 1) continue;
+          var tag = (node.tagName || "").toLowerCase();
+          if (tag === "script" || tag === "img" || tag === "source") {
+            var rawSrc = node.getAttribute("src");
+            if (rawSrc && rawSrc.indexOf("/proxy?") === -1) {
+              var absSrc = abs(rawSrc);
+              if (isSameSiteAsset(absSrc)) node.setAttribute("src", via(absSrc));
+            }
+          } else if (tag === "link") {
+            var rawHref = node.getAttribute("href");
+            if (rawHref && rawHref.indexOf("/proxy?") === -1) {
+              var absHref = abs(rawHref);
+              if (isSameSiteAsset(absHref)) node.setAttribute("href", via(absHref));
+            }
+          }
+        }
+      }
+    });
+    try {
+      certAssetObs.observe(document.documentElement || document, { childList: true, subtree: true });
+    } catch (_e) {}
   }
 
   // ---------- Enlaces ----------

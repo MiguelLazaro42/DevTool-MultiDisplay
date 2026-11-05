@@ -119,7 +119,11 @@
       copiedAiReport: "Diagnostic report copied to clipboard.",
       snapshotCopied: "Visual snapshot (PNG) copied to clipboard.",
       copiedSnapshot: "Visual snapshot (PNG) copied to clipboard.",
-      snapshotDownloaded: "Visual snapshot (PNG) downloaded."
+      snapshotDownloaded: "Visual snapshot (PNG) downloaded.",
+      certBtn: ".p12",
+      certHint: "Configure client certificate (.p12 / .pfx) for mTLS development sites",
+      certActivated: "Client certificate (.p12) activated. Reloading screens...",
+      certRemoved: "Client certificate removed."
     },
     es: {
       screens: "Pantallas",
@@ -235,7 +239,11 @@
       copiedAiReport: "Reporte de diagnóstico copiado al portapapeles.",
       snapshotCopied: "Captura visual (PNG) copiada al portapapeles.",
       copiedSnapshot: "Captura visual (PNG) copiada al portapapeles.",
-      snapshotDownloaded: "Captura visual (PNG) descargada."
+      snapshotDownloaded: "Captura visual (PNG) descargada.",
+      certBtn: ".p12",
+      certHint: "Configurar certificado cliente (.p12 / .pfx) para autenticar los visualizadores en desarrollo",
+      certActivated: "Certificado .p12 activado. Recargando pantallas...",
+      certRemoved: "Certificado .p12 desactivado."
     }
   };
 
