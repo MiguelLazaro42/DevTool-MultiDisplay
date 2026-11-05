@@ -54,6 +54,20 @@
       <button type="submit" class="btn btn-quiet" data-i18n="load">Load</button>
     </form>
 
+    <button type="button" class="bar btn btn-inspect" id="inspect-btn"
+            title="Inspect an element and copy its code (Cmd/Ctrl+Shift+C)"
+            data-i18n-title="inspectHint" aria-pressed="false">
+      <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="10" cy="10" r="7"/>
+        <line x1="10" y1="1" x2="10" y2="4"/>
+        <line x1="10" y1="16" x2="10" y2="19"/>
+        <line x1="1" y1="10" x2="4" y2="10"/>
+        <line x1="16" y1="10" x2="19" y2="10"/>
+        <circle cx="10" cy="10" r="2" fill="currentColor"/>
+      </svg>
+      <span class="btn-inspect-text" data-i18n="inspect">Inspect</span>
+    </button>
+
     <button type="button" class="bar btn btn-refresh" id="refresh-btn"
             title="Reload every screen and clear its cookies" data-i18n-title="refreshTitle">
       <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.76-4.24"/><path d="M16 3.5v3.2h-3.2"/></svg>
@@ -73,6 +87,33 @@
   </footer>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <div class="inspect-modal" id="inspect-modal" hidden role="dialog" aria-modal="true" aria-labelledby="inspect-badge">
+    <div class="inspect-modal-content">
+      <header class="inspect-modal-header">
+        <div class="inspect-modal-title-wrap">
+          <span class="inspect-tag-badge" id="inspect-badge">&lt;element&gt;</span>
+          <code class="inspect-selector" id="inspect-selector"></code>
+        </div>
+        <button type="button" class="inspect-modal-close" id="inspect-close" aria-label="Close" data-i18n-aria-label="close">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
+        </button>
+      </header>
+      <div class="inspect-code-container">
+        <pre><code class="inspect-code" id="inspect-code"></code></pre>
+      </div>
+      <footer class="inspect-modal-footer">
+        <button type="button" class="btn btn-quiet" id="inspect-copy-selector">
+          <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3h8a2 2 0 0 1 2 2v10"/><rect x="3" y="7" width="10" height="10" rx="2"/></svg>
+          <span data-i18n="copySelector">Copy Selector</span>
+        </button>
+        <button type="button" class="btn btn-inspect-copy" id="inspect-copy-html">
+          <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M4 13V4a1 1 0 0 1 1-1h9"/></svg>
+          <span data-i18n="copyHtml">Copy HTML</span>
+        </button>
+      </footer>
+    </div>
+  </div>
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>

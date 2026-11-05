@@ -37,7 +37,15 @@
       toastNoDevices: "Add a device to see the page.",
       toastClearedNoUrl: "Cookies cleared. Enter a URL to load the screens.",
       toastCleared: "Cookies cleared. Screens reloaded.",
-      toastResetFailed: "Couldn't clear cookies. Check that the server is still running."
+      toastResetFailed: "Couldn't clear cookies. Check that the server is still running.",
+      inspect: "Inspect",
+      inspectHint: "Click an element on any screen to copy its code (Cmd/Ctrl+Shift+C)",
+      inspectActive: "Inspector active: click any element",
+      copyHtml: "Copy HTML",
+      copySelector: "Copy Selector",
+      copiedHtml: "HTML copied to clipboard!",
+      copiedSelector: "CSS selector copied to clipboard!",
+      close: "Close"
     },
     es: {
       screens: "Pantallas",
@@ -71,7 +79,15 @@
       toastNoDevices: "Agrega un dispositivo para ver la página.",
       toastClearedNoUrl: "Cookies borradas. Escribe una URL para cargar las pantallas.",
       toastCleared: "Cookies borradas. Pantallas recargadas.",
-      toastResetFailed: "No se pudieron borrar las cookies. Revisa que el servidor siga corriendo."
+      toastResetFailed: "No se pudieron borrar las cookies. Revisa que el servidor siga corriendo.",
+      inspect: "Inspeccionar",
+      inspectHint: "Haz clic en un elemento de cualquier pantalla para ver y copiar su código (Cmd/Ctrl+Shift+C)",
+      inspectActive: "Inspector activo: haz clic en cualquier elemento",
+      copyHtml: "Copiar HTML",
+      copySelector: "Copiar Selector",
+      copiedHtml: "¡HTML copiado al portapapeles!",
+      copiedSelector: "¡Selector CSS copiado al portapapeles!",
+      close: "Cerrar"
     }
   };
 

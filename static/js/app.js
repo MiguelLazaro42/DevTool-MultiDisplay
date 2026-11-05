@@ -31,7 +31,8 @@
     url: "",           // URL escrita en Buscar
     frameUrls: {},     // URL actual de cada pantalla (si el usuario navegó dentro)
     zoomMode: "fit",   // "fit" (automático) o un número fijo, p. ej. 0.5
-    scale: 1           // zoom que se está mostrando ahora
+    scale: 1,          // zoom que se está mostrando ahora
+    inspector: false   // modo selector de elementos
   };
   var els = {};        // id -> { root, screen, iframe, placeholder }
 
@@ -49,6 +50,18 @@
   var addBtn = document.getElementById("add-btn");
   var menu = document.getElementById("device-menu");
   var toastEl = document.getElementById("toast");
+
+  // Elementos del Inspector
+  var inspectBtn = document.getElementById("inspect-btn");
+  var inspectModal = document.getElementById("inspect-modal");
+  var inspectBadge = document.getElementById("inspect-badge");
+  var inspectSelector = document.getElementById("inspect-selector");
+  var inspectCode = document.getElementById("inspect-code");
+  var inspectClose = document.getElementById("inspect-close");
+  var inspectCopyHtml = document.getElementById("inspect-copy-html");
+  var inspectCopySelector = document.getElementById("inspect-copy-selector");
+  var currentInspectedHtml = "";
+  var currentInspectedSelector = "";
 
   // ---------- Utilidades ----------
   function store(key, value) {
@@ -133,6 +146,11 @@
     iframe.addEventListener("load", function () {
       root.classList.remove("is-loading");
       hookFrameZoom(iframe);
+      if (state.inspector) {
+        try {
+          iframe.contentWindow.postMessage({ type: "rv:set_inspector", active: true }, location.origin);
+        } catch (_e) {}
+      }
     });
 
     screen.appendChild(placeholder);
@@ -462,6 +480,15 @@
     var w;
     try { w = iframe.contentWindow; if (!w || !w.document) return; } catch (_e) { return; }
     w.addEventListener("keydown", onZoomKey, true);
+    w.addEventListener("keydown", function (ev) {
+      if ((ev.metaKey || ev.ctrlKey) && ev.shiftKey && (ev.key === "c" || ev.key === "C")) {
+        ev.preventDefault();
+        toggleInspector();
+      } else if (ev.key === "Escape") {
+        if (state.inspector) toggleInspector(false);
+        closeInspectorModal();
+      }
+    }, true);
     w.addEventListener("wheel", function (ev) {
       onZoomWheel(ev, function (x, y) {
         var r = iframe.getBoundingClientRect();
@@ -529,8 +556,135 @@
   // Las páginas avisan cuando el usuario navega dentro de una pantalla,
   // para que Refrescar recargue la página donde está, no la inicial.
   window.addEventListener("message", function (ev) {
-    if (ev.origin !== location.origin || !ev.data || ev.data.type !== "rv:navigated") return;
-    if (els[ev.data.frame]) state.frameUrls[ev.data.frame] = ev.data.url;
+    if (ev.origin !== location.origin || !ev.data) return;
+    if (ev.data.type === "rv:navigated") {
+      if (els[ev.data.frame]) state.frameUrls[ev.data.frame] = ev.data.url;
+    } else if (ev.data.type === "rv:element_picked") {
+      showInspectorModal(ev.data);
+    }
+  });
+
+  // ---------- Inspector de Elementos ----------
+  function formatHtml(raw) {
+    if (!raw) return "";
+    var formatted = "";
+    var pad = 0;
+    var tokens = raw.replace(/>\s*</g, "><").replace(/</g, "~#~<").split("~#~");
+    tokens.forEach(function (token) {
+      token = token.trim();
+      if (!token) return;
+      if (token.match(/^<\/\w/)) {
+        pad = Math.max(0, pad - 1);
+      }
+      formatted += "  ".repeat(pad) + token + "\n";
+      if (token.match(/^<\w[^>]*[^\/]>$/) && !token.match(/^<(input|img|br|hr|meta|link|col|base|source|area)/i)) {
+        pad++;
+      }
+    });
+    return formatted.trim() || raw;
+  }
+
+  function copyText(text, successMsg) {
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        toast(successMsg);
+      }).catch(function () {
+        fallbackCopy(text, successMsg);
+      });
+    } else {
+      fallbackCopy(text, successMsg);
+    }
+  }
+
+  function fallbackCopy(text, successMsg) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+      toast(successMsg);
+    } catch (_e) {
+      toast("Error al copiar");
+    }
+    ta.remove();
+  }
+
+  function toggleInspector(on) {
+    if (on === undefined) on = !state.inspector;
+    state.inspector = on;
+    if (inspectBtn) {
+      inspectBtn.setAttribute("aria-pressed", state.inspector ? "true" : "false");
+      inspectBtn.classList.toggle("is-active", state.inspector);
+    }
+
+    state.active.forEach(function (id) {
+      var item = els[id];
+      if (item && item.iframe && item.iframe.contentWindow) {
+        try {
+          item.iframe.contentWindow.postMessage({
+            type: "rv:set_inspector",
+            active: state.inspector
+          }, location.origin);
+        } catch (_e) {}
+      }
+    });
+
+    if (state.inspector) {
+      toast(t("inspectActive"));
+    }
+  }
+
+  function closeInspectorModal() {
+    if (inspectModal) inspectModal.hidden = true;
+  }
+
+  function showInspectorModal(data) {
+    toggleInspector(false);
+    currentInspectedHtml = data.html || "";
+    currentInspectedSelector = data.selector || "";
+
+    if (inspectBadge) inspectBadge.textContent = "<" + (data.tag || "element") + ">";
+    if (inspectSelector) inspectSelector.textContent = data.selector || "";
+    if (inspectCode) inspectCode.textContent = formatHtml(data.html || "");
+    if (inspectModal) inspectModal.hidden = false;
+  }
+
+  if (inspectBtn) {
+    inspectBtn.addEventListener("click", function () {
+      toggleInspector();
+    });
+  }
+  if (inspectClose) {
+    inspectClose.addEventListener("click", closeInspectorModal);
+  }
+  if (inspectModal) {
+    inspectModal.addEventListener("click", function (e) {
+      if (e.target === inspectModal) closeInspectorModal();
+    });
+  }
+  if (inspectCopyHtml) {
+    inspectCopyHtml.addEventListener("click", function () {
+      copyText(currentInspectedHtml, t("copiedHtml"));
+    });
+  }
+  if (inspectCopySelector) {
+    inspectCopySelector.addEventListener("click", function () {
+      copyText(currentInspectedSelector, t("copiedSelector"));
+    });
+  }
+
+  window.addEventListener("keydown", function (ev) {
+    if ((ev.metaKey || ev.ctrlKey) && ev.shiftKey && (ev.key === "c" || ev.key === "C")) {
+      ev.preventDefault();
+      toggleInspector();
+    } else if (ev.key === "Escape") {
+      if (state.inspector) toggleInspector(false);
+      closeInspectorModal();
+    }
   });
 
   // ---------- Menú Agregar dispositivo ----------

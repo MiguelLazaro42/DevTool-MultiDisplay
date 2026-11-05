@@ -408,13 +408,129 @@ body {
 }
 .toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
 
+/* ---------- Botón Inspector ---------- */
+
+.btn-inspect {
+  background: #fff;
+  color: var(--ink);
+  border: 1px solid var(--steel-edge);
+  transition: all 140ms ease-out;
+}
+.btn-inspect:hover {
+  background: #EEF2F0;
+  border-color: var(--steel-tick);
+}
+.btn-inspect.is-active,
+.btn-inspect[aria-pressed="true"] {
+  background: #1a73e8;
+  border-color: #1557b0;
+  color: #fff;
+  box-shadow: 0 0 12px rgba(26, 115, 232, 0.45);
+}
+.btn-inspect.is-active:hover {
+  background: #1765c9;
+}
+
+/* ---------- Modal Inspector ---------- */
+
+.inspect-modal {
+  position: fixed; inset: 0;
+  display: grid; place-items: center;
+  background: rgba(18, 22, 21, 0.65);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 100;
+  padding: 24px 16px;
+  animation: modal-fade-in 140ms cubic-bezier(.2,.7,.2,1);
+}
+@keyframes modal-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.inspect-modal-content {
+  background: #18201D;
+  color: #E6EBE8;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  width: min(840px, 95vw);
+  max-height: 82vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+  transform-origin: center center;
+  animation: modal-pop-in 160ms cubic-bezier(.2,.8,.2,1);
+}
+@keyframes modal-pop-in { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: scale(1); } }
+
+.inspect-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px;
+  background: #131A17;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  gap: 12px;
+}
+.inspect-modal-title-wrap {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 0; flex: 1;
+}
+.inspect-tag-badge {
+  background: #1a73e8; color: #fff;
+  font: 700 12px/1 ui-monospace, Menlo, Monaco, Consolas, monospace;
+  padding: 4px 8px; border-radius: 6px;
+  white-space: nowrap; flex-shrink: 0;
+}
+.inspect-selector {
+  color: #94A3B8;
+  font: 500 12px/1.3 ui-monospace, Menlo, Monaco, Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.inspect-modal-close {
+  display: grid; place-items: center;
+  width: 32px; height: 32px; padding: 0;
+  border: 0; border-radius: 8px;
+  background: transparent; color: #94A3B8;
+  cursor: pointer; flex-shrink: 0;
+}
+.inspect-modal-close:hover { background: rgba(255,255,255,0.08); color: #fff; }
+.inspect-modal-close svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 2.2; fill: none; stroke-linecap: round; }
+
+.inspect-code-container {
+  flex: 1; overflow: auto; padding: 18px 20px;
+  background: #0E1412;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px; line-height: 1.55; color: #E2E8F0;
+  max-height: 56vh;
+}
+.inspect-code-container pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+.inspect-code-container code { font-family: inherit; }
+
+.inspect-modal-footer {
+  display: flex; align-items: center; justify-content: flex-end; gap: 12px;
+  padding: 12px 18px;
+  background: #131A17;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.inspect-modal-footer .btn-quiet {
+  color: #CFE3DA;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.inspect-modal-footer .btn-quiet:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+.btn-inspect-copy {
+  background: #1a73e8; color: #fff;
+  border-color: #1557b0;
+}
+.btn-inspect-copy:hover {
+  background: #1557b0;
+}
+
 /* ---------- Pantallas pequeñas ---------- */
 
 @media (max-width: 760px) {
-  :root { --ruler-h: 176px; }
+  :root { --ruler-h: 220px; }
   .ruler { flex-wrap: wrap; padding: 18px 16px 14px; }
   .bar-search { flex-basis: 100%; }
-  .btn-refresh, .bar-add { flex: 1 1 0; }
+  .btn-inspect, .btn-refresh, .bar-add { flex: 1 1 0; }
   .bar-add .btn-add { width: 100%; }
   .btn-refresh-hint { display: none; }
   .device-menu { width: min(300px, calc(100vw - 32px)); }

@@ -106,4 +106,124 @@
   // ---------- Aviso al visor ----------
   // Para que Refrescar recargue la página donde está esta pantalla.
   try { parent.postMessage({ type: "rv:navigated", frame: F, url: document.baseURI }, ORIGIN); } catch (_e) {}
+
+  // ---------- Inspector de Elementos ----------
+  var inspectorActive = false;
+  var overlayEl = null;
+  var badgeEl = null;
+
+  function ensureInspectorOverlay() {
+    if (overlayEl) return;
+    overlayEl = document.createElement("div");
+    overlayEl.id = "__rv_inspect_box";
+    overlayEl.style.cssText =
+      "position:absolute;pointer-events:none;z-index:2147483647;" +
+      "border:2px solid #1a73e8;background:rgba(26,115,232,0.18);" +
+      "box-sizing:border-box;display:none;transition:top 35ms,left 35ms,width 35ms,height 35ms;";
+
+    badgeEl = document.createElement("div");
+    badgeEl.style.cssText =
+      "position:absolute;top:-26px;left:-2px;background:#18201D;color:#CFE3DA;" +
+      "font:600 11px/1.2 monospace;padding:4px 8px;border-radius:4px;white-space:nowrap;" +
+      "box-shadow:0 4px 10px rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.15);" +
+      "pointer-events:none;z-index:2147483647;";
+
+    overlayEl.appendChild(badgeEl);
+    (document.body || document.documentElement).appendChild(overlayEl);
+  }
+
+  function getSelector(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return "";
+    var path = [];
+    while (el && el.nodeType === Node.ELEMENT_NODE) {
+      var name = el.nodeName.toLowerCase();
+      if (el.id) {
+        path.unshift(name + "#" + el.id);
+        break;
+      }
+      var sib = el, nth = 1;
+      while ((sib = sib.previousElementSibling)) {
+        if (sib.nodeName.toLowerCase() === name) nth++;
+      }
+      var part = name;
+      if (nth > 1) part += ":nth-of-type(" + nth + ")";
+      if (el.classList && el.classList.length) {
+        part += "." + el.classList[0];
+      }
+      path.unshift(part);
+      el = el.parentElement;
+      if (el && el.tagName && el.tagName.toLowerCase() === "body") break;
+    }
+    return path.join(" > ");
+  }
+
+  function onInspectMove(e) {
+    if (!inspectorActive) return;
+    var target = e.target;
+    if (!target || target === overlayEl || (overlayEl && overlayEl.contains(target))) return;
+    if (target === document.documentElement || target === document.body) return;
+
+    ensureInspectorOverlay();
+    var r = target.getBoundingClientRect();
+    var sx = window.pageXOffset || document.documentElement.scrollLeft || 0;
+    var sy = window.pageYOffset || document.documentElement.scrollTop || 0;
+
+    overlayEl.style.top = (r.top + sy) + "px";
+    overlayEl.style.left = (r.left + sx) + "px";
+    overlayEl.style.width = r.width + "px";
+    overlayEl.style.height = r.height + "px";
+    overlayEl.style.display = "block";
+
+    var label = target.tagName.toLowerCase();
+    if (target.id) label += "#" + target.id;
+    else if (target.classList && target.classList.length) label += "." + target.classList[0];
+    label += " | " + Math.round(r.width) + "×" + Math.round(r.height);
+
+    badgeEl.textContent = label;
+    if (r.top < 32) {
+      badgeEl.style.top = (r.height + 4) + "px";
+    } else {
+      badgeEl.style.top = "-26px";
+    }
+  }
+
+  function onInspectClick(e) {
+    if (!inspectorActive) return;
+    var target = e.target;
+    if (!target || target === overlayEl || (overlayEl && overlayEl.contains(target))) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    if (overlayEl) overlayEl.style.display = "none";
+
+    var tag = target.tagName.toLowerCase();
+    var selector = getSelector(target);
+    var html = target.outerHTML;
+
+    try {
+      parent.postMessage({
+        type: "rv:element_picked",
+        frame: F,
+        device: D,
+        tag: tag,
+        selector: selector,
+        html: html
+      }, ORIGIN);
+    } catch (_e) {}
+  }
+
+  window.addEventListener("mousemove", onInspectMove, true);
+  window.addEventListener("click", onInspectClick, true);
+
+  window.addEventListener("message", function (e) {
+    if (e.origin !== ORIGIN || !e.data) return;
+    if (e.data.type === "rv:set_inspector") {
+      inspectorActive = !!e.data.active;
+      if (!inspectorActive && overlayEl) {
+        overlayEl.style.display = "none";
+      }
+    }
+  });
 })();
