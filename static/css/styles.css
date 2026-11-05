@@ -189,8 +189,12 @@ body {
   position: relative;
   padding: var(--bezel-w);
   background: var(--bezel);
-  border-radius: calc(var(--radius) + var(--bezel-w));
-  box-shadow: 0 1px 0 rgba(255,255,255,.08) inset, 0 18px 30px -18px rgba(0,0,0,.55);
+  border: 2.5px solid var(--dev-color, rgba(255, 255, 255, 0.25));
+  border-radius: calc(var(--radius) + var(--bezel-w) + 2px);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.45),
+    0 0 16px -3px var(--dev-color, transparent),
+    0 18px 30px -18px rgba(0, 0, 0, 0.65);
 }
 
 .device-screen {
@@ -245,9 +249,24 @@ body {
 }
 .device-name {
   grid-column: 1 / -1; justify-self: center;
+  display: inline-flex; align-items: center; gap: 6px;
   max-width: 100%;
   font-weight: 600; color: #fff; font-size: 13px; line-height: 1.1;
   overflow: hidden; text-overflow: ellipsis;
+}
+.device-color-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.device-menu-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .device-size { font: 500 12px/1 var(--font-measure); letter-spacing: .02em; }
 .device-dpr  { font: 500 11px/1 var(--font-measure); opacity: .75; }
@@ -1020,10 +1039,13 @@ body.is-resizing-split iframe {
   text-overflow: ellipsis;
   color: #CBD5E1;
 }
+.traffic-table tbody tr td:first-child {
+  box-shadow: inset 3px 0 0 var(--dev-color, transparent);
+}
 .col-id { width: 42px; color: #64748B !important; }
 .col-method { width: 64px; }
 .col-status { width: 58px; }
-.col-device { width: 105px; }
+.col-device { width: 132px; }
 .col-host { width: 135px; }
 .col-path { width: auto; }
 .col-mime { width: 52px; }
@@ -1033,6 +1055,31 @@ body.is-resizing-split iframe {
 .col-level { width: 62px; }
 .col-cmsg { width: auto; }
 .col-csource { width: 120px; color: #94A3B8 !important; }
+
+.device-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 1px 7px 1px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--dev-color, #64748B);
+  background: rgba(15, 23, 42, 0.72);
+  color: var(--dev-color, #E2E8F0);
+  font-weight: 700;
+  font-size: 10.5px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.device-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dev-color, #94A3B8);
+  box-shadow: 0 0 5px var(--dev-color, transparent);
+  flex-shrink: 0;
+}
 
 .level-badge {
   display: inline-block;

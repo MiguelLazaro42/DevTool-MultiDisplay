@@ -201,11 +201,23 @@
   }
 
   // ---------- Pantallas ----------
+  var FALLBACK_COLORS = ["#38BDF8", "#A855F7", "#EC4899", "#22C55E", "#F59E0B", "#14B8A6", "#6366F1", "#FB923C", "#E879F9", "#F43F5E"];
+  function deviceColor(id) {
+    var d = BY_ID[id];
+    if (d && d.color) return d.color;
+    var h = 0;
+    var s = String(id || "");
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return FALLBACK_COLORS[h % FALLBACK_COLORS.length];
+  }
+
   function createDevice(id) {
     var d = BY_ID[id];
+    var color = deviceColor(id);
     var root = document.createElement("figure");
     root.className = "device is-entering";
     root.dataset.kind = d.kind;
+    root.style.setProperty("--dev-color", color);
 
     var body = document.createElement("div");
     body.className = "device-body";
@@ -244,7 +256,12 @@
     caption.className = "device-caption";
     var name = document.createElement("span");
     name.className = "device-name";
-    name.textContent = d.name;
+    var colorDot = document.createElement("span");
+    colorDot.className = "device-color-dot";
+    colorDot.style.backgroundColor = color;
+    colorDot.style.boxShadow = "0 0 6px " + color;
+    name.appendChild(colorDot);
+    name.appendChild(document.createTextNode(d.name));
     var size = document.createElement("span");
     size.className = "device-size";
     size.textContent = d.width + " × " + d.height;
@@ -1241,12 +1258,25 @@
     return "status-5xx";
   }
 
+  function buildDeviceChip(deviceId, deviceName) {
+    var col = deviceColor(deviceId);
+    var pill = document.createElement("span");
+    pill.className = "device-pill";
+    pill.style.setProperty("--dev-color", col);
+    var dot = document.createElement("span");
+    dot.className = "device-pill-dot";
+    pill.appendChild(dot);
+    pill.appendChild(document.createTextNode(deviceName || deviceId || "—"));
+    return pill;
+  }
+
   function populateTrafficDeviceSelect() {
     if (!trafficDeviceFilter) return;
     CATALOG.forEach(function (d) {
       var opt = document.createElement("option");
       opt.value = d.id;
-      opt.textContent = d.name;
+      opt.textContent = "● " + d.name;
+      opt.style.color = deviceColor(d.id);
       trafficDeviceFilter.appendChild(opt);
     });
   }
@@ -1294,6 +1324,8 @@
     filtered.forEach(function (item, idx) {
       var tr = document.createElement("tr");
       if (item.id === trafficState.selectedId) tr.className = "is-selected";
+      var devCol = deviceColor(item.device_id);
+      tr.style.setProperty("--dev-color", devCol);
 
       var tdId = document.createElement("td");
       tdId.className = "col-id";
@@ -1312,7 +1344,7 @@
 
       var tdDevice = document.createElement("td");
       tdDevice.className = "col-device";
-      tdDevice.textContent = item.device_name;
+      tdDevice.appendChild(buildDeviceChip(item.device_id, item.device_name));
       tdDevice.title = item.device_name;
 
       var tdHost = document.createElement("td");
@@ -1464,6 +1496,7 @@
     filtered.forEach(function (item, idx) {
       var tr = document.createElement("tr");
       if (item.id === consoleState.selectedId) tr.className = "is-selected";
+      tr.style.setProperty("--dev-color", deviceColor(item.device_id));
 
       var tdId = document.createElement("td");
       tdId.className = "col-id";
@@ -1478,7 +1511,7 @@
 
       var tdDevice = document.createElement("td");
       tdDevice.className = "col-device";
-      tdDevice.textContent = item.device_name;
+      tdDevice.appendChild(buildDeviceChip(item.device_id, item.device_name));
       tdDevice.title = item.device_name;
 
       var tdMsg = document.createElement("td");
@@ -1899,7 +1932,12 @@
         check.className = "device-menu-check";
         check.appendChild(icon(["m4.5 10.5 3.5 3.5 7.5-8"]));
         var label = document.createElement("span");
-        label.textContent = d.name;
+        label.className = "device-menu-label";
+        var menuDot = document.createElement("span");
+        menuDot.className = "device-color-dot";
+        menuDot.style.backgroundColor = deviceColor(d.id);
+        label.appendChild(menuDot);
+        label.appendChild(document.createTextNode(d.name));
         var size = document.createElement("span");
         size.className = "device-menu-size";
         size.textContent = d.width + " × " + d.height;
