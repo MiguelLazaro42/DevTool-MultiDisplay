@@ -33,6 +33,8 @@ from flask import cli as flask_cli
 from devices import DEFAULT_DEVICE_IDS, DEVICES, DEVICES_BY_ID
 
 app = Flask(__name__)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
 REQUEST_TIMEOUT = 15  # segundos
 

@@ -189,16 +189,27 @@
       <span class="btn-inspect-text" data-i18n="inspect">Inspect</span>
     </button>
 
-    <button type="button" class="bar btn btn-traffic" id="traffic-btn"
-            title="Inspect HTTP requests and responses (Burp-style HTTP History)"
-            data-i18n-title="trafficHint" aria-pressed="false">
-      <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
-        <path d="M3 6h14M3 10h10M3 14h7"/>
-        <circle cx="15.5" cy="13.5" r="2.5"/>
-      </svg>
-      <span class="btn-traffic-text" data-i18n="traffic">Peticiones</span>
-      <span class="traffic-badge" id="traffic-count">0</span>
-    </button>
+    <div class="bar bar-traffic-group">
+      <button type="button" class="btn btn-traffic" id="traffic-btn"
+              title="Inspect HTTP requests and responses (Burp-style HTTP History)"
+              data-i18n-title="trafficHint" aria-pressed="false">
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M3 6h14M3 10h10M3 14h7"/>
+          <circle cx="15.5" cy="13.5" r="2.5"/>
+        </svg>
+        <span class="btn-traffic-text" data-i18n="traffic">Peticiones</span>
+        <span class="traffic-badge" id="traffic-count">0</span>
+      </button>
+      <button type="button" class="btn btn-traffic-detach" id="traffic-ruler-popout"
+              title="Sacar el tráfico HTTP en una ventana independiente para otro monitor"
+              data-i18n-title="trafficPopoutHint" aria-label="Ventana independiente">
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M11 4h5v5"/>
+          <path d="M16 4 9.5 10.5"/>
+          <path d="M15 11.5V15a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3.5"/>
+        </svg>
+      </button>
+    </div>
 
     <button type="button" class="bar btn btn-refresh" id="refresh-btn"
             title="Reload every screen and clear its cookies" data-i18n-title="refreshTitle">

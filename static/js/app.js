@@ -79,6 +79,7 @@
   var trafficPauseBtn = document.getElementById("traffic-pause-btn");
   var trafficClearBtn = document.getElementById("traffic-clear-btn");
   var trafficPopoutBtn = document.getElementById("traffic-popout-btn");
+  var trafficRulerPopout = document.getElementById("traffic-ruler-popout");
   var trafficCloseBtn = document.getElementById("traffic-close-btn");
   var trafficTbody = document.getElementById("traffic-tbody");
   var trafficEmpty = document.getElementById("traffic-empty");
@@ -1325,15 +1326,19 @@
       postCrossTab({ type: "bc:traffic_clear" });
     });
   }
+  function openTrafficStandaloneWindow() {
+    toggleTrafficPanel(false);
+    window.open(
+      location.origin + "/?mode=traffic",
+      "rv_traffic_window",
+      "width=1140,height=680,resizable=yes,scrollbars=yes"
+    );
+  }
   if (trafficPopoutBtn) {
-    trafficPopoutBtn.addEventListener("click", function () {
-      toggleTrafficPanel(false);
-      window.open(
-        location.origin + "/?mode=traffic",
-        "rv_traffic_window",
-        "width=1140,height=680,resizable=yes,scrollbars=yes"
-      );
-    });
+    trafficPopoutBtn.addEventListener("click", openTrafficStandaloneWindow);
+  }
+  if (trafficRulerPopout) {
+    trafficRulerPopout.addEventListener("click", openTrafficStandaloneWindow);
   }
   if (trafficSearch) {
     trafficSearch.addEventListener("input", function () {

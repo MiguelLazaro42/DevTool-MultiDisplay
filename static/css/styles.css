@@ -663,25 +663,52 @@ body {
 
 /* ---------- Botón y Panel de Tráfico HTTP (Estilo Burp Suite) ---------- */
 
+.bar-traffic-group {
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+  overflow: hidden;
+}
 .btn-traffic {
   gap: 8px;
-  padding: 0 13px;
+  padding: 0 12px;
   color: var(--ink);
   cursor: pointer;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 .btn-traffic:hover { background: var(--surface-hover); }
 .btn-traffic.is-active,
 .btn-traffic[aria-pressed="true"] {
   background: #f59e0b;
   color: #0F172A;
-  border-color: #d97706;
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.32);
 }
 .btn-traffic.is-active .bar-icon,
 .btn-traffic[aria-pressed="true"] .bar-icon {
   color: #0F172A;
 }
 .btn-traffic-text { font-weight: 600; }
+
+.btn-traffic-detach {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--surface-edge);
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--ink);
+  cursor: pointer;
+}
+.btn-traffic-detach:hover {
+  background: #38bdf8;
+  color: #0F172A;
+}
+.btn-traffic-detach:hover .bar-icon {
+  color: #0F172A;
+}
 
 .traffic-badge {
   display: inline-flex;
