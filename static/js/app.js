@@ -1109,6 +1109,7 @@
       if (!state.sync) return;
       var scrollPayload = {
         type: "rv:do_sync_scroll",
+        containerSelector: d.containerSelector || "",
         x: d.x,
         y: d.y,
         dx: d.dx,
@@ -1991,40 +1992,97 @@
     });
   }
 
-  // ---------- Grabadora de Flujo de Usuario (Pasos Markdown + Playwright) ----------
+  // ---------- Rastreador de Usuario (Pasos con Sección, Zona, Coordenadas, Scroll, Swipe + Playwright) ----------
   function matchesFlowFilter(item) {
     if (trafficState.deviceFilter !== "all" && item.device_id !== trafficState.deviceFilter) {
       return false;
     }
     if (trafficState.searchQuery) {
       var q = trafficState.searchQuery.toLowerCase();
-      var hay = ((item.action || "") + " " + (item.selector || "") + " " + (item.label || item.text || "") + " " + (item.value || "") + " " + (item.device_name || "")).toLowerCase();
+      var hay = (
+        (item.action || "") + " " +
+        (item.section || "") + " " +
+        (item.zone || "") + " " +
+        (item.selector || "") + " " +
+        (item.label || item.text || "") + " " +
+        (item.value || "") + " " +
+        (item.device_name || "")
+      ).toLowerCase();
       if (hay.indexOf(q) === -1) return false;
     }
     return true;
   }
 
+  function formatFlowStepLine(st, num) {
+    var txt = st.label || st.text || "";
+    var sec = st.section ? (" | **Sección:** " + st.section) : "";
+    var zn = st.zone ? (" | **Zona:** " + st.zone) : "";
+    var c = st.coords || {};
+    var coordStr = (typeof c.x === "number" && typeof c.y === "number" && st.action !== "scroll")
+      ? (" · `(x:" + c.x + "px, y:" + c.y + "px)`")
+      : "";
+
+    if (st.action === "navigate") {
+      return num + ". **[NAVEGAR]** a `" + (st.url || st.value) + "` — *[" + st.device_name + "]*";
+    }
+    if (st.action === "scroll") {
+      var targetDesc = (st.selector && st.selector !== "window") ? (" en contenedor `" + st.selector + "`") : " en página";
+      return num + ". **[SCROLL]** " + (txt || st.value || "Deslizamiento") + targetDesc + sec + " — *[" + st.device_name + "]*";
+    }
+    if (st.action === "swipe") {
+      return num + ". **[SWIPE]** " + (txt || "Arrastre") + " `" + (st.value || "") + "` en `" + (st.selector || st.tag) + "`" + sec + zn + " — *[" + st.device_name + "]*";
+    }
+    if (st.action === "click") {
+      var label = txt ? (" (\"" + txt + "\")") : "";
+      return num + ". **[CLIC]** en `" + (st.selector || st.tag) + "`" + label + sec + zn + coordStr + " — *[" + st.device_name + "]*";
+    }
+    if (st.action === "input") {
+      return num + ". **[INPUT]** Escribir `" + (st.value || "") + "` en `" + (st.selector || st.tag) + "`" + (txt ? " (" + txt + ")" : "") + sec + zn + coordStr + " — *[" + st.device_name + "]*";
+    }
+    if (st.action === "submit") {
+      return num + ". **[SUBMIT]** Enviar formulario `" + (st.selector || "form") + "`" + (txt ? " (\"" + txt + "\")" : "") + sec + " — *[" + st.device_name + "]*";
+    }
+    if (st.action === "keypress") {
+      return num + ". **[TECLA]** `" + (st.value || txt) + "` sobre `" + (st.selector || st.tag) + "`" + sec + " — *[" + st.device_name + "]*";
+    }
+    return num + ". **[" + (st.action || "PASO").toUpperCase() + "]** en `" + (st.selector || "") + "`" + sec + zn + " — *[" + st.device_name + "]*";
+  }
+
   function buildFlowMarkdown(steps) {
     if (!steps || !steps.length) return t("flowSelectHint");
     var lines = [
-      "## Pasos para reproducir el flujo (" + steps.length + " acciones)",
+      "## Rastreador de Interacciones del Usuario (" + steps.length + " eventos)",
       "- **URL inicial:** " + (state.url || steps[0].url || "—"),
       ""
     ];
     steps.forEach(function (st, i) {
-      var num = i + 1;
-      var txt = st.label || st.text || "";
-      if (st.action === "navigate") {
-        lines.push(num + ". **Navegar** en `" + st.device_name + "` a `" + (st.url || st.value) + "`");
-      } else if (st.action === "click") {
-        var label = txt ? (" (\"" + txt + "\")") : "";
-        lines.push(num + ". **Clic** en `" + (st.selector || st.tag) + "`" + label + " — *[" + st.device_name + "]*");
-      } else if (st.action === "input") {
-        lines.push(num + ". **Escribir** `" + (st.value || "") + "` en `" + (st.selector || st.tag) + "` — *[" + st.device_name + "]*");
-      } else {
-        lines.push(num + ". **" + st.action + "** en `" + (st.selector || "") + "` — *[" + st.device_name + "]*");
-      }
+      lines.push(formatFlowStepLine(st, i + 1));
     });
+
+    // Si hay un paso seleccionado en la tabla, mostrar su ficha técnica detallada abajo
+    var selItem = null;
+    if (flowState.selectedId) {
+      for (var k = 0; k < steps.length; k++) {
+        if (steps[k].id === flowState.selectedId) { selItem = steps[k]; break; }
+      }
+    }
+    if (selItem) {
+      var sc = selItem.coords || {};
+      var sb = selItem.box || {};
+      lines.push(
+        "",
+        "---",
+        "### Detalle del Evento Seleccionado (#" + selItem.id + " · " + (selItem.action || "").toUpperCase() + ")",
+        "- **Dispositivo:** " + selItem.device_name + " (" + selItem.time + ")",
+        "- **Sección de la página:** " + (selItem.section || "—"),
+        "- **Zona de la pantalla:** " + (selItem.zone || "—"),
+        "- **Coordenadas exactas:** " + (typeof sc.x === "number" ? ("x=" + sc.x + "px, y=" + sc.y + "px (" + (sc.xPct || 0) + "% X, " + (sc.yPct || 0) + "% Y en viewport " + (sc.vw || 0) + "×" + (sc.vh || 0) + ")") : "—"),
+        "- **Elemento / Selector:** `" + (selItem.selector || selItem.tag || "—") + "`",
+        "- **Dimensiones del elemento:** " + (sb.width ? (sb.width + "×" + sb.height + "px en (" + sb.x + ", " + sb.y + ")") : "—"),
+        "- **Etiqueta / Valor:** " + (selItem.label || "—") + (selItem.value ? (" → `" + selItem.value + "`") : "")
+      );
+    }
+
     return lines.join("\n");
   }
 
@@ -2042,16 +2100,36 @@
     ];
     steps.forEach(function (st) {
       var sel = st.selector || st.tag || "body";
+      var comment = st.section ? (" // Sección: " + st.section + (st.zone ? " [" + st.zone + "]" : "")) : "";
       if (st.action === "navigate" && st.url) {
         lines.push("  await page.goto(" + JSON.stringify(st.url) + ");");
       } else if (st.action === "click") {
-        lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().click();");
+        lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().click();" + comment);
+      } else if (st.action === "scroll") {
+        var sc = st.coords || {};
+        if (sel && sel !== "window") {
+          lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().evaluate((el) => el.scrollTo(" + (sc.scrollLeft || 0) + ", " + (sc.scrollTop || 0) + "));" + comment);
+        } else {
+          lines.push("  await page.mouse.wheel(" + (sc.dx || 0) + ", " + (sc.dy || 0) + ");" + comment);
+        }
+      } else if (st.action === "swipe") {
+        var sw = st.coords || {};
+        lines.push(
+          "  await page.mouse.move(" + (sw.x || 0) + ", " + (sw.y || 0) + ");",
+          "  await page.mouse.down();",
+          "  await page.mouse.move(" + (sw.endX || 0) + ", " + (sw.endY || 0) + ", { steps: 8 });",
+          "  await page.mouse.up();" + comment
+        );
       } else if (st.action === "input") {
         if (st.inputType === "checkbox" || st.inputType === "radio") {
-          lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().setChecked(" + (st.value === "checked" ? "true" : "false") + ");");
+          lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().setChecked(" + (st.value === "checked" ? "true" : "false") + ");" + comment);
         } else {
-          lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().fill(" + JSON.stringify(st.value || "") + ");");
+          lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().fill(" + JSON.stringify(st.value || "") + ");" + comment);
         }
+      } else if (st.action === "keypress" && st.value) {
+        lines.push("  await page.keyboard.press(" + JSON.stringify(st.value) + ");" + comment);
+      } else if (st.action === "submit") {
+        lines.push("  await page.locator(" + JSON.stringify(sel) + ").first().evaluate((f) => f.requestSubmit ? f.requestSubmit() : f.submit());" + comment);
       }
     });
     lines.push("});");
@@ -2068,6 +2146,13 @@
     flowRawCode.textContent = flowState.format === "playwright"
       ? buildFlowPlaywright(filtered)
       : buildFlowMarkdown(filtered);
+  }
+
+  function flowBadgeClass(action) {
+    if (action === "click") return "method-GET";
+    if (action === "input" || action === "submit") return "method-POST";
+    if (action === "scroll" || action === "swipe") return "method-PUT";
+    return "method-PATCH";
   }
 
   function renderFlowTable(scrollToBottom) {
@@ -2088,14 +2173,19 @@
       var tdAct = document.createElement("td");
       tdAct.className = "col-method";
       var badge = document.createElement("span");
-      var bCls = item.action === "click" ? "method-GET" : (item.action === "input" ? "method-POST" : "method-PUT");
-      badge.className = "method-badge " + bCls;
+      badge.className = "method-badge " + flowBadgeClass(item.action);
       badge.textContent = (item.action || "step").toUpperCase();
       tdAct.appendChild(badge);
 
       var tdDev = document.createElement("td");
       tdDev.className = "col-device";
       tdDev.appendChild(buildDeviceChip(item.device_id, item.device_name));
+
+      var tdSec = document.createElement("td");
+      tdSec.className = "col-csource";
+      var secText = (item.section || "—") + (item.zone ? (" · " + item.zone) : "");
+      tdSec.textContent = secText;
+      tdSec.title = secText;
 
       var tdSel = document.createElement("td");
       tdSel.className = "col-host";
@@ -2106,7 +2196,9 @@
       tdVal.className = "col-cmsg";
       var valText = item.action === "input"
         ? ("Valor: \"" + (item.value || "") + "\"")
-        : (item.label || item.text || item.url || "—");
+        : (item.action === "scroll"
+          ? (item.label || item.value || "Scroll")
+          : (item.label || item.text || item.value || item.url || "—"));
       tdVal.textContent = valText;
       tdVal.title = valText;
 
@@ -2117,6 +2209,7 @@
       tr.appendChild(tdId);
       tr.appendChild(tdAct);
       tr.appendChild(tdDev);
+      tr.appendChild(tdSec);
       tr.appendChild(tdSel);
       tr.appendChild(tdVal);
       tr.appendChild(tdTime);
@@ -2549,21 +2642,14 @@
     }
 
     if (inc.flow) {
-      var recentSteps = flowState.items.slice(-15);
-      md.push("## 5. Últimos Pasos del Usuario (Reproducción)");
+      var recentSteps = flowState.items.slice(-20);
+      md.push("## 5. Rastreador de Interacciones del Usuario (Clics, Scroll, Zona y Sección)");
       if (recentSteps.length) {
         recentSteps.forEach(function (st, idx) {
-          var lbl = st.label || st.text || "";
-          if (st.action === "navigate") {
-            md.push((idx + 1) + ". Navegar a `" + (st.url || st.value) + "` (" + st.device_name + ")");
-          } else if (st.action === "click") {
-            md.push((idx + 1) + ". Clic en `" + st.selector + "`" + (lbl ? " (\"" + lbl + "\")" : "") + " (" + st.device_name + ")");
-          } else if (st.action === "input") {
-            md.push((idx + 1) + ". Escribir `" + st.value + "` en `" + st.selector + "` (" + st.device_name + ")");
-          }
+          md.push(formatFlowStepLine(st, idx + 1));
         });
       } else {
-        md.push("_Sin interacciones grabadas aún._");
+        md.push("_Sin interacciones registradas aún._");
       }
       md.push("");
     }
@@ -3288,6 +3374,48 @@
           ctx.fillRect(ix, Math.max(dy, iy - 14), tw, 14);
           ctx.fillStyle = "#FFFFFF";
           ctx.fillText(tagTxt, ix + 4, Math.max(dy + 10, iy - 4));
+        });
+
+        // Marcadores visuales de las últimas interacciones del usuario en esta pantalla (clics, inputs, swipes)
+        var devSteps = flowState.items.filter(function (st) {
+          return st.device_id === id && st.coords && typeof st.coords.x === "number" && st.action !== "scroll";
+        }).slice(-5);
+        devSteps.forEach(function (st, sIdx) {
+          var sx = dx + st.coords.x * scale;
+          var sy = dy + st.coords.y * scale;
+          if (sx < dx || sx > dx + dw || sy < dy || sy > dy + dh) return;
+
+          if (st.action === "swipe" && typeof st.coords.endX === "number") {
+            var ex = dx + st.coords.endX * scale;
+            var ey = dy + st.coords.endY * scale;
+            ctx.strokeStyle = "rgba(26, 115, 232, 0.85)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+          }
+
+          ctx.fillStyle = "rgba(26, 115, 232, 0.22)";
+          ctx.beginPath();
+          ctx.arc(sx, sy, 11, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "#1A73E8";
+          ctx.strokeStyle = "#FFFFFF";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 7.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = "#FFFFFF";
+          ctx.font = "700 8.5px ui-monospace, monospace";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(String(sIdx + 1), sx, sy + 0.5);
+          ctx.textAlign = "left";
+          ctx.textBaseline = "alphabetic";
         });
 
         ctx.restore();

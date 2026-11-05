@@ -425,6 +425,11 @@ def api_flow():
                 "label": (payload.get("label") or payload.get("text") or "")[:600],
                 "value": (payload.get("value") or "")[:1000],
                 "url": (payload.get("url") or "")[:1000],
+                "section": (payload.get("section") or "")[:300],
+                "zone": (payload.get("zone") or "")[:120],
+                "coords": payload.get("coords") or {},
+                "box": payload.get("box") or {},
+                "inputType": (payload.get("inputType") or "")[:60],
             }
             _flow_log.append(entry)
         return jsonify({"ok": True, "item": entry})

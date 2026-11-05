@@ -587,34 +587,309 @@
     }, 320);
   }
 
-  // 1. Emitir scroll sincronizado desde cualquier pantalla
-  window.addEventListener("scroll", function () {
-    var x = window.pageXOffset || document.documentElement.scrollLeft || 0;
-    var y = window.pageYOffset || document.documentElement.scrollTop || 0;
-    if (!syncActive || Date.now() < ignoreScrollUntil) {
-      lastScrollX = x;
-      lastScrollY = y;
+  // ---------- Rastreador de Usuario (Zona de Pantalla, Sección Semántica, Scroll, Swipe, Clic, Input) ----------
+  function getScreenZoneAndCoords(clientX, clientY) {
+    var vw = Math.max(1, document.documentElement.clientWidth || window.innerWidth || 1);
+    var vh = Math.max(1, document.documentElement.clientHeight || window.innerHeight || 1);
+    var x = Math.round(typeof clientX === "number" ? clientX : vw / 2);
+    var y = Math.round(typeof clientY === "number" ? clientY : vh / 2);
+    var xPct = Math.max(0, Math.min(100, Math.round((x / vw) * 100)));
+    var yPct = Math.max(0, Math.min(100, Math.round((y / vh) * 100)));
+
+    var vZone = yPct < 33 ? "Superior" : (yPct < 67 ? "Centro" : "Inferior");
+    var hZone = xPct < 33 ? "Izquierda" : (xPct < 67 ? "Centro" : "Derecha");
+    var zone = (vZone === "Centro" && hZone === "Centro") ? "Centro" : (vZone + "-" + hZone);
+
+    return {
+      x: x,
+      y: y,
+      xPct: xPct,
+      yPct: yPct,
+      vw: vw,
+      vh: vh,
+      zone: zone
+    };
+  }
+
+  function extractLandmarkHeading(container) {
+    if (!container || !container.querySelector) return "";
+    var ariaLbl = container.getAttribute && (container.getAttribute("aria-label") || container.getAttribute("title") || "");
+    if (ariaLbl) return ariaLbl.replace(/\s+/g, " ").trim().slice(0, 40);
+    var ariaBy = container.getAttribute && container.getAttribute("aria-labelledby");
+    if (ariaBy) {
+      var refEl = document.getElementById(ariaBy.split(/\s+/)[0]);
+      if (refEl && refEl.innerText) return refEl.innerText.replace(/\s+/g, " ").trim().slice(0, 40);
+    }
+    var h = container.querySelector("h1, h2, h3, h4, legend, [class*='title'], [class*='header']");
+    if (h && h.innerText) {
+      var ht = h.innerText.replace(/\s+/g, " ").trim();
+      if (ht) return ht.slice(0, 40);
+    }
+    return "";
+  }
+
+  function getSemanticSection(el) {
+    if (!el || el.nodeType !== 1) return "Página principal";
+    var parts = [];
+    var cur = el;
+    var modalFound = false;
+    var landmarkFound = false;
+
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      var tag = (cur.tagName || "").toLowerCase();
+      var role = (cur.getAttribute && cur.getAttribute("role")) || "";
+      var ariaModal = (cur.getAttribute && cur.getAttribute("aria-modal")) || "";
+      var clsId = ((typeof cur.className === "string" ? cur.className : "") + " " + (cur.id || ""));
+
+      if (!modalFound && (tag === "dialog" || ariaModal === "true" || role === "dialog" || role === "alertdialog" || /\b(modal|dialog|drawer|popup|popover|sheet|lightbox)\b/i.test(clsId))) {
+        modalFound = true;
+        var mTitle = extractLandmarkHeading(cur);
+        var mId = cur.id ? ("#" + cur.id) : "";
+        parts.unshift("Modal" + mId + (mTitle ? (' "' + mTitle + '"') : ""));
+      } else if (!landmarkFound) {
+        if (tag === "header" || role === "banner") {
+          landmarkFound = true;
+          parts.unshift("Encabezado (<header>)");
+        } else if (tag === "nav" || role === "navigation") {
+          landmarkFound = true;
+          var nTitle = extractLandmarkHeading(cur);
+          parts.unshift("Navegación (<nav>" + (nTitle ? ' "' + nTitle + '"' : "") + ")");
+        } else if (tag === "form") {
+          var fTitle = extractLandmarkHeading(cur) || cur.getAttribute("name") || (cur.id ? "#" + cur.id : "");
+          parts.unshift("Formulario" + (fTitle ? (' "' + fTitle + '"') : " (<form>)"));
+        } else if (tag === "table") {
+          parts.unshift("Tabla (<table>)");
+        } else if (tag === "aside" || role === "complementary") {
+          landmarkFound = true;
+          parts.unshift("Barra lateral (<aside>)");
+        } else if (tag === "footer" || role === "contentinfo") {
+          landmarkFound = true;
+          parts.unshift("Pie de página (<footer>)");
+        } else if (tag === "section" || tag === "article") {
+          landmarkFound = true;
+          var sTitle = extractLandmarkHeading(cur) || (cur.id ? "#" + cur.id : "");
+          parts.unshift("Sección" + (sTitle ? (' "' + sTitle + '"') : (" (<" + tag + ">)")));
+        } else if (tag === "main" || role === "main") {
+          landmarkFound = true;
+          var mainTitle = cur.id ? ("#" + cur.id) : "";
+          parts.unshift("Contenido principal (<main" + mainTitle + ">)");
+        }
+      }
+      cur = cur.parentElement;
+    }
+
+    if (!parts.length) {
+      var nearSection = el.closest && el.closest("[id]");
+      if (nearSection && nearSection !== document.body) {
+        return "Contenedor #" + nearSection.id;
+      }
+      return "Cuerpo de página (<body>)";
+    }
+    // Evitar duplicados consecutivos y limitar a 2 niveles claros
+    var unique = [];
+    for (var i = 0; i < parts.length; i++) {
+      if (unique.indexOf(parts[i]) === -1) unique.push(parts[i]);
+    }
+    return unique.slice(0, 2).join(" › ");
+  }
+
+  function getElementBox(el) {
+    if (!el || !el.getBoundingClientRect) return {};
+    var r = el.getBoundingClientRect();
+    return {
+      x: Math.round(r.left),
+      y: Math.round(r.top),
+      width: Math.round(r.width),
+      height: Math.round(r.height)
+    };
+  }
+
+  // 1. Emitir scroll sincronizado (ventana y contenedores internos) y registrar en el Rastreador de Usuario
+  var scrollTrackState = {
+    timer: null,
+    startX: lastScrollX,
+    startY: lastScrollY,
+    targetEl: null,
+    tracking: false
+  };
+
+  window.addEventListener("scroll", function (e) {
+    var target = e.target;
+    var isDocScroll = (!target || target === document || target === document.documentElement || target === document.body);
+    var x = isDocScroll ? (window.pageXOffset || document.documentElement.scrollLeft || 0) : (target.scrollLeft || 0);
+    var y = isDocScroll ? (window.pageYOffset || document.documentElement.scrollTop || 0) : (target.scrollTop || 0);
+
+    if (Date.now() < ignoreScrollUntil || isReplayingSync) {
+      if (isDocScroll) {
+        lastScrollX = x;
+        lastScrollY = y;
+      }
       return;
     }
-    var dx = x - lastScrollX;
-    var dy = y - lastScrollY;
-    lastScrollX = x;
-    lastScrollY = y;
-    if (dx === 0 && dy === 0) return;
+
+    if (isDocScroll) {
+      var dx = x - lastScrollX;
+      var dy = y - lastScrollY;
+      lastScrollX = x;
+      lastScrollY = y;
+      if (dx !== 0 || dy !== 0) {
+        if (syncActive) {
+          try {
+            parent.postMessage({
+              type: "rv:sync_scroll",
+              frame: F,
+              x: x,
+              y: y,
+              dx: dx,
+              dy: dy
+            }, ORIGIN);
+          } catch (_e) {}
+        }
+      }
+    } else if (target && target.nodeType === 1 && syncActive) {
+      try {
+        parent.postMessage({
+          type: "rv:sync_scroll",
+          frame: F,
+          containerSelector: getSelector(target, false),
+          x: x,
+          y: y
+        }, ORIGIN);
+      } catch (_e) {}
+    }
+
+    // Consolidar el deslizamiento para el Rastreador del Usuario
+    if (!scrollTrackState.tracking || scrollTrackState.targetEl !== (isDocScroll ? null : target)) {
+      scrollTrackState.tracking = true;
+      scrollTrackState.targetEl = isDocScroll ? null : target;
+      scrollTrackState.startX = x;
+      scrollTrackState.startY = y;
+    }
+    clearTimeout(scrollTrackState.timer);
+    scrollTrackState.timer = setTimeout(function () {
+      var endX = isDocScroll ? (window.pageXOffset || document.documentElement.scrollLeft || 0) : (target ? target.scrollLeft || 0 : 0);
+      var endY = isDocScroll ? (window.pageYOffset || document.documentElement.scrollTop || 0) : (target ? target.scrollTop || 0 : 0);
+      var totalDx = Math.round(endX - scrollTrackState.startX);
+      var totalDy = Math.round(endY - scrollTrackState.startY);
+      scrollTrackState.tracking = false;
+
+      if (Math.abs(totalDx) < 12 && Math.abs(totalDy) < 12) return;
+
+      var vw = Math.max(1, document.documentElement.clientWidth || window.innerWidth || 1);
+      var vh = Math.max(1, document.documentElement.clientHeight || window.innerHeight || 1);
+      var maxScrollY = isDocScroll
+        ? Math.max(1, (document.documentElement.scrollHeight || document.body.scrollHeight || vh) - vh)
+        : Math.max(1, (target.scrollHeight || vh) - (target.clientHeight || vh));
+      var depthY = Math.max(0, Math.min(100, Math.round((endY / maxScrollY) * 100)));
+
+      var dirParts = [];
+      if (Math.abs(totalDy) >= 12) {
+        dirParts.push((totalDy > 0 ? "Abajo +" : "Arriba ") + totalDy + "px");
+      }
+      if (Math.abs(totalDx) >= 12) {
+        dirParts.push((totalDx > 0 ? "Derecha +" : "Izquierda ") + totalDx + "px");
+      }
+      var dirSummary = dirParts.join(", ") + " (profundidad: " + depthY + "%)";
+
+      var centerEl = null;
+      try {
+        centerEl = isDocScroll ? document.elementFromPoint(vw / 2, vh / 2) : target;
+      } catch (_e) {}
+      var secName = getSemanticSection(centerEl || target || document.body);
+      var scrollSel = isDocScroll ? "window" : getSelector(target, false);
+      var zInfo = getScreenZoneAndCoords(vw / 2, vh / 2);
+
+      try {
+        parent.postMessage({
+          type: "rv:flow_event",
+          frame: F,
+          device: D,
+          action: "scroll",
+          selector: scrollSel,
+          tag: isDocScroll ? "window" : (target.tagName || "").toLowerCase(),
+          label: dirSummary,
+          value: "scrollTop=" + Math.round(endY) + "px (" + depthY + "%)",
+          section: secName,
+          zone: isDocScroll ? ("Vista al " + depthY + "%") : zInfo.zone,
+          coords: {
+            x: zInfo.x,
+            y: zInfo.y,
+            xPct: zInfo.xPct,
+            yPct: depthY,
+            dx: totalDx,
+            dy: totalDy,
+            scrollTop: Math.round(endY),
+            scrollLeft: Math.round(endX),
+            depthY: depthY,
+            vw: vw,
+            vh: vh
+          },
+          url: getCurrentPageUrl()
+        }, ORIGIN);
+      } catch (_e) {}
+    }, 320);
+  }, true);
+
+  // 1b. Detectar gestos de arrastre / swipe horizontal o vertical
+  var pointerDownState = null;
+  window.addEventListener("pointerdown", function (e) {
+    if (inspectorActive || isReplayingSync || !e.isTrusted) return;
+    pointerDownState = {
+      x: e.clientX,
+      y: e.clientY,
+      time: Date.now(),
+      target: e.target
+    };
+  }, true);
+
+  window.addEventListener("pointerup", function (e) {
+    if (!pointerDownState || inspectorActive || isReplayingSync || !e.isTrusted) return;
+    var st = pointerDownState;
+    pointerDownState = null;
+    var dx = Math.round(e.clientX - st.x);
+    var dy = Math.round(e.clientY - st.y);
+    var dist = Math.round(Math.sqrt(dx * dx + dy * dy));
+    var elapsed = Date.now() - st.time;
+    if (dist < 40 || elapsed > 2500) return;
+
+    var el = (st.target && st.target.nodeType === 1) ? st.target : document.body;
+    var zStart = getScreenZoneAndCoords(st.x, st.y);
+    var zEnd = getScreenZoneAndCoords(e.clientX, e.clientY);
+    var dir = Math.abs(dx) >= Math.abs(dy)
+      ? (dx > 0 ? "Derecha +" + dx + "px" : "Izquierda " + dx + "px")
+      : (dy > 0 ? "Abajo +" + dy + "px" : "Arriba " + dy + "px");
 
     try {
       parent.postMessage({
-        type: "rv:sync_scroll",
+        type: "rv:flow_event",
         frame: F,
-        x: x,
-        y: y,
-        dx: dx,
-        dy: dy
+        device: D,
+        action: "swipe",
+        selector: getSelector(el, false),
+        tag: (el.tagName || "").toLowerCase(),
+        label: "Deslizar / Arrastrar (" + dir + ")",
+        value: "(" + zStart.x + "," + zStart.y + ") → (" + zEnd.x + "," + zEnd.y + ")",
+        section: getSemanticSection(el),
+        zone: zStart.zone + " → " + zEnd.zone,
+        coords: {
+          x: zStart.x,
+          y: zStart.y,
+          xPct: zStart.xPct,
+          yPct: zStart.yPct,
+          endX: zEnd.x,
+          endY: zEnd.y,
+          dx: dx,
+          dy: dy,
+          vw: zStart.vw,
+          vh: zStart.vh
+        },
+        box: getElementBox(el),
+        url: getCurrentPageUrl()
       }, ORIGIN);
     } catch (_e) {}
-  }, { passive: true });
+  }, true);
 
-  // 2. Emitir clics sincronizados y registrar en el Flujo de Usuario para IA
+  // 2. Emitir clics sincronizados y registrar en el Rastreador de Usuario (con coordenadas, zona y sección)
   window.addEventListener("click", function (e) {
     if (inspectorActive || isReplayingSync || !e.isTrusted) return;
     var target = e.target;
@@ -623,11 +898,17 @@
     var interactive = target.closest && target.closest("a, button, [role='button'], input, select, textarea, label, summary");
     var mainEl = interactive || target;
     var tag = mainEl.tagName ? mainEl.tagName.toLowerCase() : "";
-    var text = (mainEl.innerText || mainEl.getAttribute("aria-label") || mainEl.getAttribute("title") || mainEl.value || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    var text = (mainEl.innerText || mainEl.getAttribute("aria-label") || mainEl.getAttribute("title") || mainEl.getAttribute("placeholder") || mainEl.value || "").replace(/\s+/g, " ").trim().slice(0, 80);
     var aEl = target.closest && target.closest("a[href]");
     var href = aEl ? aEl.getAttribute("href") : "";
     var absHref = aEl ? aEl.href : "";
     var bestSel = interactive ? getSelector(interactive, false) : getSelector(target, false);
+
+    var box = getElementBox(mainEl);
+    var cx = (e.clientX && e.clientX > 0) ? e.clientX : ((box.x || 0) + (box.width || 0) / 2);
+    var cy = (e.clientY && e.clientY > 0) ? e.clientY : ((box.y || 0) + (box.height || 0) / 2);
+    var zInfo = getScreenZoneAndCoords(cx, cy);
+    var secName = getSemanticSection(mainEl);
 
     try {
       parent.postMessage({
@@ -639,6 +920,10 @@
         tag: tag,
         label: text,
         value: href || "",
+        section: secName,
+        zone: zInfo.zone + " (" + zInfo.xPct + "%, " + zInfo.yPct + "%)",
+        coords: zInfo,
+        box: box,
         url: getCurrentPageUrl()
       }, ORIGIN);
     } catch (_e) {}
@@ -661,7 +946,7 @@
     } catch (_e) {}
   }, true);
 
-  // 3. Emitir escritura / cambios en inputs y registrar en el Flujo de Usuario
+  // 3. Emitir escritura / cambios en inputs y registrar en el Rastreador de Usuario
   var flowInputTimers = new WeakMap();
   function onSyncInput(e) {
     if (inspectorActive || isReplayingSync || !e.isTrusted) return;
@@ -676,7 +961,10 @@
     if (e.type === "change" || e.type === "input") {
       clearTimeout(flowInputTimers.get(t));
       var timer = setTimeout(function () {
-        var displayVal = inputType === "password" ? "••••••••" : (inputType === "checkbox" || inputType === "radio" ? String(!!t.checked) : String(t.value || ""));
+        var displayVal = inputType === "password" ? "••••••••" : (inputType === "checkbox" || inputType === "radio" ? (t.checked ? "checked" : "unchecked") : String(t.value || ""));
+        var box = getElementBox(t);
+        var zInfo = getScreenZoneAndCoords((box.x || 0) + (box.width || 0) / 2, (box.y || 0) + (box.height || 0) / 2);
+        var secName = getSemanticSection(t);
         try {
           parent.postMessage({
             type: "rv:flow_event",
@@ -685,8 +973,13 @@
             action: "input",
             selector: sel,
             tag: tag,
+            inputType: inputType,
             label: t.placeholder || t.name || t.id || tag,
             value: displayVal.slice(0, 200),
+            section: secName,
+            zone: zInfo.zone + " (" + zInfo.xPct + "%, " + zInfo.yPct + "%)",
+            coords: zInfo,
+            box: box,
             url: getCurrentPageUrl()
           }, ORIGIN);
         } catch (_e) {}
@@ -714,6 +1007,57 @@
   }
   window.addEventListener("input", onSyncInput, true);
   window.addEventListener("change", onSyncInput, true);
+
+  // 4. Registrar envío de formularios y teclas clave (Enter / Escape)
+  window.addEventListener("submit", function (e) {
+    if (inspectorActive || isReplayingSync || !e.isTrusted) return;
+    var form = e.target;
+    if (!form || !form.tagName) return;
+    var box = getElementBox(form);
+    var zInfo = getScreenZoneAndCoords((box.x || 0) + (box.width || 0) / 2, (box.y || 0) + (box.height || 0) / 2);
+    try {
+      parent.postMessage({
+        type: "rv:flow_event",
+        frame: F,
+        device: D,
+        action: "submit",
+        selector: getSelector(form, false),
+        tag: "form",
+        label: extractLandmarkHeading(form) || form.getAttribute("action") || "Formulario",
+        value: form.getAttribute("method") || "POST",
+        section: getSemanticSection(form),
+        zone: zInfo.zone + " (" + zInfo.xPct + "%, " + zInfo.yPct + "%)",
+        coords: zInfo,
+        box: box,
+        url: getCurrentPageUrl()
+      }, ORIGIN);
+    } catch (_e) {}
+  }, true);
+
+  window.addEventListener("keydown", function (e) {
+    if (inspectorActive || isReplayingSync || !e.isTrusted) return;
+    if (e.key !== "Enter" && e.key !== "Escape") return;
+    var activeEl = document.activeElement || document.body;
+    var box = getElementBox(activeEl);
+    var zInfo = getScreenZoneAndCoords((box.x || 0) + (box.width || 0) / 2, (box.y || 0) + (box.height || 0) / 2);
+    try {
+      parent.postMessage({
+        type: "rv:flow_event",
+        frame: F,
+        device: D,
+        action: "keypress",
+        selector: getSelector(activeEl, false),
+        tag: (activeEl.tagName || "body").toLowerCase(),
+        label: "Tecla " + e.key,
+        value: e.key,
+        section: getSemanticSection(activeEl),
+        zone: zInfo.zone,
+        coords: zInfo,
+        box: box,
+        url: getCurrentPageUrl()
+      }, ORIGIN);
+    } catch (_e) {}
+  }, true);
 
   function findSyncedClickElement(d) {
     var selectors = [d.selector, d.interactiveSelector, d.structuralSelector, d.interactiveStructural];
@@ -764,6 +1108,16 @@
     } else if (d.type === "rv:do_sync_scroll") {
       if (!syncActive && !d.force) return;
       ignoreScrollUntil = Date.now() + 90;
+      if (d.containerSelector) {
+        try {
+          var cEl = document.querySelector(d.containerSelector);
+          if (cEl) {
+            cEl.scrollLeft = d.x || 0;
+            cEl.scrollTop = d.y || 0;
+          }
+        } catch (_e) {}
+        return;
+      }
       if (d.y !== undefined && d.y <= 1) {
         window.scrollTo(d.x <= 1 ? 0 : (window.pageXOffset + d.dx), 0);
       } else {

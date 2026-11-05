@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=17">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=18">
 </head>
 <body>
   <main class="mat" aria-label="Screens" data-i18n-aria-label="screens">
@@ -255,7 +255,7 @@
       </div>
     </div>
 
-    <!-- Vista dividida de Grabador de Flujo / Pasos de Usuario -->
+    <!-- Vista dividida de Grabador de Flujo / Rastreador de Usuario -->
     <div class="traffic-split" id="flow-split-view" hidden>
       <div class="traffic-table-wrap">
         <table class="traffic-table">
@@ -264,14 +264,15 @@
               <th class="col-id">#</th>
               <th class="col-method">Acción</th>
               <th class="col-device">Device</th>
+              <th class="col-csource">Sección / Zona</th>
               <th class="col-path">Selector / Elemento</th>
-              <th class="col-host">Valor / Texto</th>
+              <th class="col-host">Detalle / Valor</th>
               <th class="col-ctime">Hora</th>
             </tr>
           </thead>
           <tbody id="flow-tbody"></tbody>
         </table>
-        <div class="traffic-empty" id="flow-empty" data-i18n="flowEmpty">Interactúa con cualquier pantalla (clics, escritura, navegación) y los pasos aparecerán aquí automáticamente.</div>
+        <div class="traffic-empty" id="flow-empty" data-i18n="flowEmpty">Interactúa con cualquier pantalla (clics, deslizamientos/scroll, escritura, navegación) y el rastreador registrará cada acción aquí.</div>
       </div>
 
       <div class="traffic-split-resizer" data-resizer="split" title="Arrastra para ajustar el ancho de las columnas"></div>
@@ -494,7 +495,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=17"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=17"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=18"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=18"></script>
 </body>
 </html>
