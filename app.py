@@ -65,9 +65,23 @@ _audit_lock = threading.Lock()
 _client_storage_by_device = {}
 _storage_lock = threading.Lock()
 
-# Último elemento inspeccionado/copiado (compartido entre monitores).
+# Último elemento inspeccionado/copiado (compartido entre monitores y separado por versión móvil vs desktop).
 _last_inspected = {}
+_inspected_by_tier = {}
+_inspected_by_device = {}
 _inspected_lock = threading.Lock()
+
+# Contexto estructural de cada template activo (Móvil vs Desktop) reportado por cada pantalla.
+_templates_by_device = {}
+_templates_lock = threading.Lock()
+
+
+def _device_tier(device):
+    kind = (device or {}).get("kind", "")
+    width = (device or {}).get("width", 0) or 0
+    if kind in ("phone", "tablet") or (0 < width < 960):
+        return "mobile"
+    return "desktop"
 
 
 def _format_body_preview(raw_bytes, content_type, max_chars=12000):
@@ -256,12 +270,19 @@ def proxy():
     if device is None:
         return error_page("unknown_device", url)
 
+    is_mobile_ua = device.get("kind") == "phone"
+    ua_str = device["ua"]
+    platform_hint = '"iOS"' if ("iPhone" in ua_str or "iPad" in ua_str) else ('"Android"' if "Android" in ua_str else '"macOS"')
     headers = {
-        "User-Agent": device["ua"],
+        "User-Agent": ua_str,
         "Accept": request.headers.get(
             "Accept", "text/html,application/xhtml+xml,*/*;q=0.8"
         ),
         "Accept-Language": request.headers.get("Accept-Language", "en-US,en;q=0.9"),
+        "Sec-CH-UA-Mobile": "?1" if is_mobile_ua else "?0",
+        "Sec-CH-UA-Platform": platform_hint,
+        "Viewport-Width": str(device.get("width", 1280)),
+        "X-Device-Type": "mobile" if device.get("kind") == "phone" else ("tablet" if device.get("kind") == "tablet" else "desktop"),
     }
     for name in FORWARDED_REQUEST_HEADERS:
         if name in request.headers:
@@ -597,28 +618,79 @@ def api_inspected():
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
         dev_id = payload.get("device") or payload.get("frame") or "unknown"
-        device = DEVICES_BY_ID.get(dev_id, {"id": dev_id, "name": dev_id, "width": 0, "height": 0})
+        device = DEVICES_BY_ID.get(dev_id, {"id": dev_id, "name": dev_id, "width": 0, "height": 0, "kind": "desktop"})
+        tier = _device_tier(device)
+        is_counterpart = bool(payload.get("isCounterpart"))
+        item_data = {
+            "time": datetime.datetime.now().strftime("%H:%M:%S"),
+            "device_id": device["id"],
+            "device_name": device["name"],
+            "kind": device.get("kind", "desktop"),
+            "tier": tier,
+            "viewport": f"{device.get('width', 0)}×{device.get('height', 0)}",
+            "url": payload.get("url") or "",
+            "tag": payload.get("tag") or "",
+            "selector": payload.get("selector") or "",
+            "section": (payload.get("section") or "")[:300],
+            "width": payload.get("width") or 0,
+            "height": payload.get("height") or 0,
+            "box": payload.get("box") or {},
+            "stylesSummary": payload.get("stylesSummary") or "",
+            "stylesMap": payload.get("stylesMap") or {},
+            "html": (payload.get("html") or "")[:12000],
+            "isCounterpart": is_counterpart,
+            "matchedBy": (payload.get("matchedBy") or "")[:120],
+            "notFoundInTemplate": bool(payload.get("notFoundInTemplate")),
+        }
         with _inspected_lock:
-            _last_inspected = {
-                "time": datetime.datetime.now().strftime("%H:%M:%S"),
-                "device_id": device["id"],
-                "device_name": device["name"],
-                "viewport": f"{device.get('width', 0)}×{device.get('height', 0)}",
-                "url": payload.get("url") or "",
-                "tag": payload.get("tag") or "",
-                "selector": payload.get("selector") or "",
-                "width": payload.get("width") or 0,
-                "height": payload.get("height") or 0,
-                "box": payload.get("box") or {},
-                "stylesSummary": payload.get("stylesSummary") or "",
-                "stylesMap": payload.get("stylesMap") or {},
-                "html": (payload.get("html") or "")[:12000],
-            }
-        return jsonify({"ok": True, "item": _last_inspected})
+            if not is_counterpart:
+                _last_inspected = item_data
+            _inspected_by_tier[tier] = item_data
+            _inspected_by_device[device["id"]] = item_data
+        return jsonify({
+            "ok": True,
+            "item": _last_inspected,
+            "by_tier": dict(_inspected_by_tier),
+            "by_device": dict(_inspected_by_device),
+        })
 
     with _inspected_lock:
         data = dict(_last_inspected) if _last_inspected else None
-    return jsonify({"item": data})
+        by_tier = dict(_inspected_by_tier)
+        by_dev = dict(_inspected_by_device)
+    return jsonify({"item": data, "by_tier": by_tier, "by_device": by_dev})
+
+
+@app.route("/api/templates", methods=["GET", "POST"])
+def api_templates():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        dev_id = payload.get("device") or payload.get("frame") or "unknown"
+        device = DEVICES_BY_ID.get(dev_id, {"id": dev_id, "name": dev_id, "width": 0, "height": 0, "kind": "desktop"})
+        tier = _device_tier(device)
+        entry = {
+            "updated_at": datetime.datetime.now().strftime("%H:%M:%S"),
+            "device_id": device["id"],
+            "device_name": device["name"],
+            "kind": device.get("kind", "desktop"),
+            "tier": tier,
+            "viewport": f"{device.get('width', 0)}×{device.get('height', 0)}",
+            "url": (payload.get("url") or "")[:1000],
+            "title": (payload.get("title") or "")[:300],
+            "bodySignature": (payload.get("bodySignature") or "")[:400],
+            "rootContainers": (payload.get("rootContainers") or [])[:15],
+            "stylesheets": (payload.get("stylesheets") or [])[:15],
+            "landmarks": (payload.get("landmarks") or [])[:20],
+            "activeModal": payload.get("activeModal") or None,
+            "domOutline": (payload.get("domOutline") or "")[:4000],
+        }
+        with _templates_lock:
+            _templates_by_device[device["id"]] = entry
+        return jsonify({"ok": True, "item": entry})
+
+    with _templates_lock:
+        items = list(_templates_by_device.values())
+    return jsonify({"items": items})
 
 
 def find_free_port(preferred, attempts=20):

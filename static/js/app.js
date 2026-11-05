@@ -200,7 +200,21 @@
   };
 
   var lastInspectedElement = null;
+  var inspectedByTier = { mobile: null, desktop: null };
+  var inspectedByDevice = {};
+  var templatesByDevice = {};
   var pendingDomSnapshots = {};
+
+  function getDeviceTier(deviceId) {
+    var d = BY_ID[deviceId];
+    if (!d) return "desktop";
+    if (d.kind === "phone" || d.kind === "tablet" || (d.width && d.width < 960)) return "mobile";
+    return "desktop";
+  }
+
+  function getDeviceTierTag(deviceId) {
+    return getDeviceTier(deviceId) === "mobile" ? "MÓVIL" : "DESKTOP";
+  }
 
   // Canal de sincronización entre múltiples pestañas / monitores (BroadcastChannel)
   var TAB_ID = "tab_" + Math.random().toString(36).slice(2, 9);
@@ -1092,6 +1106,20 @@
         fetchStorage();
         postCrossTab({ type: "bc:storage_ping" });
       }).catch(function () {});
+    } else if (d.type === "rv:template_context") {
+      fetch("/api/templates", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(d)
+      }).then(function (r) { return r.ok ? r.json() : null; }).then(function (res) {
+        if (res && res.item) {
+          templatesByDevice[res.item.device_id] = res.item;
+        }
+        postCrossTab({ type: "bc:templates_ping" });
+      }).catch(function () {});
+    } else if (d.type === "rv:counterpart_found") {
+      onCounterpartFound(d);
     } else if (d.type === "rv:dom_layout_snapshot") {
       if (d.frame && pendingDomSnapshots[d.frame]) {
         pendingDomSnapshots[d.frame](d);
@@ -1177,8 +1205,32 @@
         fetchStorage();
         return;
       }
+      if (msg.type === "bc:templates_ping") {
+        fetch("/api/templates", { credentials: "same-origin" })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (data) {
+            if (data && Array.isArray(data.items)) {
+              data.items.forEach(function (it) { templatesByDevice[it.device_id] = it; });
+            }
+          }).catch(function () {});
+        return;
+      }
+      if (msg.type === "bc:find_counterpart" && msg.identifiers) {
+        broadcastToOtherFrames(msg.sourceFrame || null, {
+          type: "rv:find_counterpart",
+          identifiers: msg.identifiers
+        });
+        return;
+      }
       if (msg.type === "bc:inspected_ping" && msg.item) {
-        lastInspectedElement = msg.item;
+        if (!msg.item.isCounterpart) {
+          lastInspectedElement = msg.item;
+        }
+        var tKey = msg.item.tier || getDeviceTier(msg.item.device_id || msg.item.frame);
+        inspectedByTier[tKey] = msg.item;
+        if (msg.item.device_id || msg.item.frame) {
+          inspectedByDevice[msg.item.device_id || msg.item.frame] = msg.item;
+        }
         return;
       }
       if (msg.type === "bc:traffic_clear") {
@@ -1393,13 +1445,15 @@
     return "";
   }
 
-  function formatInspectedClipboardText(item) {
-    if (!item) return "";
+  function formatSingleInspectedBlock(header, item) {
     var boxStr = formatBoxString(item.box);
     var lines = [
+      "[" + header + " — " + (item.device_name || item.frame || "—") + "]",
       "link: " + (item.url || state.url || ""),
       "device: " + (item.device_name || item.frame || "—")
     ];
+    if (item.matchedBy) lines.push("match: " + item.matchedBy);
+    if (item.section) lines.push("section: " + item.section);
     if (item.selector) lines.push("selector: " + item.selector);
     if (boxStr) lines.push("box: " + boxStr);
     if (item.stylesSummary) lines.push("styles: " + item.stylesSummary);
@@ -1407,24 +1461,87 @@
     return lines.join("\n");
   }
 
-  function onInspectorPicked(data) {
-    if (!state.inspector) return;
+  function formatInspectedClipboardText(item) {
+    if (!item) return "";
+    var mob = inspectedByTier.mobile;
+    var desk = inspectedByTier.desktop;
+    if (mob && desk) {
+      return formatSingleInspectedBlock("VERSIÓN MÓVIL", mob) + "\n\n" + formatSingleInspectedBlock("VERSIÓN DESKTOP", desk);
+    }
+    var tierHdr = (item.tier === "mobile" ? "VERSIÓN MÓVIL" : "VERSIÓN DESKTOP");
+    return formatSingleInspectedBlock(tierHdr, item);
+  }
+
+  function onCounterpartFound(data) {
     var dObj = BY_ID[data.frame];
     var devLabel = dObj ? (dObj.name + " (" + dObj.width + "×" + dObj.height + ")") : (data.frame || "");
     var endpoint = data.url || state.frameUrls[data.frame] || state.url || "";
-    lastInspectedElement = {
+    var tier = getDeviceTier(data.frame);
+    var cpItem = {
       frame: data.frame,
+      device_id: data.frame,
       device_name: devLabel,
+      tier: tier,
       url: endpoint,
       tag: data.tag || "element",
       selector: data.selector || "",
+      section: data.section || "",
       width: data.width || 0,
       height: data.height || 0,
       box: data.box || "",
       stylesSummary: data.stylesSummary || "",
       stylesMap: data.stylesMap || {},
-      html: data.html || ""
+      html: data.html || "",
+      isCounterpart: true,
+      matchedBy: data.matchedBy || "",
+      notFoundInTemplate: !!data.notFoundInTemplate
     };
+    inspectedByTier[tier] = cpItem;
+    inspectedByDevice[data.frame] = cpItem;
+
+    fetch("/api/inspected", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cpItem)
+    }).catch(function () {});
+    postCrossTab({ type: "bc:inspected_ping", item: cpItem });
+
+    // Si el usuario acaba de inspeccionar en la otra versión (Móvil <-> Desktop), actualizar el portapapeles con ambas versiones
+    if (state.inspector && lastInspectedElement && lastInspectedElement.tier !== tier) {
+      var dualPayload = formatInspectedClipboardText(lastInspectedElement);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(dualPayload).catch(function () {});
+      }
+    }
+  }
+
+  function onInspectorPicked(data) {
+    if (!state.inspector) return;
+    var dObj = BY_ID[data.frame];
+    var devLabel = dObj ? (dObj.name + " (" + dObj.width + "×" + dObj.height + ")") : (data.frame || "");
+    var endpoint = data.url || state.frameUrls[data.frame] || state.url || "";
+    var tier = getDeviceTier(data.frame);
+    lastInspectedElement = {
+      frame: data.frame,
+      device_id: data.frame,
+      device_name: devLabel,
+      tier: tier,
+      url: endpoint,
+      tag: data.tag || "element",
+      selector: data.selector || "",
+      section: data.section || "",
+      width: data.width || 0,
+      height: data.height || 0,
+      box: data.box || "",
+      stylesSummary: data.stylesSummary || "",
+      stylesMap: data.stylesMap || {},
+      html: data.html || "",
+      isCounterpart: false,
+      matchedBy: "Selección directa del usuario"
+    };
+    inspectedByTier[tier] = lastInspectedElement;
+    inspectedByDevice[data.frame] = lastInspectedElement;
 
     fetch("/api/inspected", {
       method: "POST",
@@ -1433,6 +1550,19 @@
       body: JSON.stringify(lastInspectedElement)
     }).catch(function () {});
     postCrossTab({ type: "bc:inspected_ping", item: lastInspectedElement });
+
+    // Buscar automáticamente el elemento equivalente en los otros templates activos (Móvil <-> Desktop), incluyendo otros monitores
+    if (data.identifiers) {
+      broadcastToOtherFrames(data.frame, {
+        type: "rv:find_counterpart",
+        identifiers: data.identifiers
+      });
+      postCrossTab({
+        type: "bc:find_counterpart",
+        sourceFrame: data.frame,
+        identifiers: data.identifiers
+      });
+    }
 
     var payload = formatInspectedClipboardText(lastInspectedElement);
     // Al dar clic se copia link:, device:, selector:, box:, styles: y element: al portapapeles sin salir del modo inspección
@@ -2551,38 +2681,107 @@
     return map;
   }
 
+  function formatInspectedBlockForTier(title, item) {
+    if (!item) return [];
+    var out = [
+      "### " + title + " — " + (item.device_name || item.frame || "—"),
+      "- **URL / Ruta:** " + (item.url || state.url || "—"),
+      "- **Estado en este template:** " + (item.matchedBy || (item.isCounterpart ? "Equivalente automático" : "Selección directa del usuario")),
+      "- **Sección semántica:** " + (item.section || "—"),
+      "- **Selector CSS:** `" + (item.selector || "—") + "`",
+      "- **Layout Box:** `" + (formatBoxString(item.box) || "—") + "`",
+      "- **Computed Styles:** `" + (item.stylesSummary || "—") + "`",
+      "```html",
+      item.html || "",
+      "```",
+      ""
+    ];
+    return out;
+  }
+
+  function formatTemplateProfileBlock(label, tpl) {
+    if (!tpl) return [];
+    var lines = [
+      "### " + label + ": " + tpl.device_name + " (" + tpl.viewport + ")",
+      "- **URL / Ruta cargada:** `" + (tpl.url || state.url || "—") + "`" + (tpl.title ? (' — Título: "' + tpl.title + '"') : ""),
+      "- **Firma `<body>`:** `" + (tpl.bodySignature || "<body>") + "`",
+      "- **Contenedores raíz del template:** " + ((tpl.rootContainers && tpl.rootContainers.length) ? tpl.rootContainers.map(function (c) { return "`" + c + "`"; }).join(", ") : "—"),
+      "- **Hojas CSS cargadas:** " + ((tpl.stylesheets && tpl.stylesheets.length) ? tpl.stylesheets.map(function (s) { return "`" + s + "`"; }).join(", ") : "inline / internas"),
+      "- **Secciones visibles (Landmarks):** " + ((tpl.landmarks && tpl.landmarks.length) ? tpl.landmarks.join(" · ") : "—")
+    ];
+    if (tpl.activeModal) {
+      lines.push(
+        "- **Modal / Diálogo abierto actualmente:** `" + tpl.activeModal.selector + "` (\"" + tpl.activeModal.title + "\", " + tpl.activeModal.box + ")"
+      );
+    }
+    if (tpl.domOutline) {
+      lines.push(
+        "- **Estructura DOM del template (" + label + "):**",
+        "```html",
+        tpl.domOutline,
+        "```"
+      );
+    }
+    lines.push("");
+    return lines;
+  }
+
   function buildAiMarkdownReport() {
     var inc = getAiModalToggleMap();
     var nowStr = new Date().toLocaleTimeString();
     var activeDevs = state.active.map(function (id) {
       var d = BY_ID[id];
-      return d ? (d.name + " (" + d.width + "×" + d.height + " @" + d.dpr + "x)") : id;
+      return d ? ("[" + getDeviceTierTag(id) + "] " + d.name + " (" + d.width + "×" + d.height + " @" + d.dpr + "x)") : id;
+    });
+
+    // Agrupar perfiles de templates activos (incluyendo pantallas abiertas en otros monitores)
+    var mobileTpl = null;
+    var desktopTpl = null;
+    Object.keys(templatesByDevice).forEach(function (devId) {
+      var tpl = templatesByDevice[devId];
+      if (!tpl) return;
+      if (tpl.tier === "mobile" && !mobileTpl) mobileTpl = tpl;
+      if (tpl.tier === "desktop" && !desktopTpl) desktopTpl = tpl;
     });
 
     var md = [
-      "# Reporte de Diagnóstico Web",
+      "# Reporte de Diagnóstico Web (Contexto Móvil + Desktop)",
       "- **URL activa:** " + (state.url || "—"),
-      "- **Pantallas activas (" + activeDevs.length + "):** " + (activeDevs.join(", ") || "Ninguna"),
+      "- **Pantallas en esta ventana (" + activeDevs.length + "):** " + (activeDevs.join(", ") || "Ninguna"),
       "- **Hora de captura:** " + nowStr,
       ""
     ];
 
     if (inc.element) {
-      md.push("## 1. Último Elemento Inspeccionado y Estilos Computados");
-      if (lastInspectedElement) {
-        md.push(
-          "- **Dispositivo:** " + (lastInspectedElement.device_name || lastInspectedElement.frame),
-          "- **URL del frame:** " + (lastInspectedElement.url || state.url || "—"),
-          "- **Selector CSS:** `" + (lastInspectedElement.selector || "—") + "`",
-          "- **Layout Box:** `" + (formatBoxString(lastInspectedElement.box) || "—") + "`",
-          "- **Computed Styles:** `" + (lastInspectedElement.stylesSummary || "—") + "`",
-          "```html",
-          lastInspectedElement.html || "",
-          "```",
-          ""
-        );
+      md.push("## 1. Contexto de Templates (Versión Móvil vs. Versión Desktop) y Elemento Inspeccionado");
+
+      if (mobileTpl || desktopTpl) {
+        if (mobileTpl) {
+          md = md.concat(formatTemplateProfileBlock("Template Versión Móvil", mobileTpl));
+        } else {
+          md.push("### Template Versión Móvil", "_Sin pantalla móvil activa actualmente._", "");
+        }
+        if (desktopTpl) {
+          md = md.concat(formatTemplateProfileBlock("Template Versión Desktop", desktopTpl));
+        } else {
+          md.push("### Template Versión Desktop", "_Sin pantalla desktop activa actualmente._", "");
+        }
+      }
+
+      var mobInsp = inspectedByTier.mobile;
+      var deskInsp = inspectedByTier.desktop;
+      if (mobInsp || deskInsp || lastInspectedElement) {
+        if (mobInsp) {
+          md = md.concat(formatInspectedBlockForTier("Elemento en Versión Móvil", mobInsp));
+        }
+        if (deskInsp) {
+          md = md.concat(formatInspectedBlockForTier("Elemento Equivalente en Versión Desktop", deskInsp));
+        }
+        if (!mobInsp && !deskInsp && lastInspectedElement) {
+          md = md.concat(formatInspectedBlockForTier("Último Elemento Inspeccionado", lastInspectedElement));
+        }
       } else {
-        md.push("_Ningún elemento seleccionado recientemente (usa el botón Inspeccionar y haz clic sobre un elemento)._", "");
+        md.push("_Ningún elemento puntual seleccionado con el Inspector (se incluye arriba la estructura DOM de ambos templates Móvil y Desktop)._", "");
       }
     }
 
@@ -2591,10 +2790,11 @@
         return c.level === "error" || c.level === "warn";
       }).slice(-15);
       var recentLogs = errWarns.length ? errWarns : consoleState.items.slice(-10);
-      md.push("## 2. Consola del Navegador (" + errWarns.length + " errores/warnings)");
+      md.push("## 2. Consola del Navegador por Versión (" + errWarns.length + " errores/warnings)");
       if (recentLogs.length) {
         recentLogs.forEach(function (c) {
-          md.push("- **[" + c.level.toUpperCase() + "]** (" + c.device_name + " · " + c.time + "): `" + (c.message || "").replace(/\n/g, " ") + "`" + (c.source ? " _[" + c.source + "]_" : ""));
+          var tierTag = getDeviceTierTag(c.device_id);
+          md.push("- **[" + c.level.toUpperCase() + "]** **[" + tierTag + " · " + c.device_name + "]** (" + c.time + "): `" + (c.message || "").replace(/\n/g, " ") + "`" + (c.source ? " _[" + c.source + "]_" : ""));
           if (c.stack && c.level === "error") {
             md.push("  ```", "  " + c.stack.split("\n").slice(0, 5).join("\n  "), "  ```");
           }
@@ -2608,12 +2808,13 @@
     if (inc.http) {
       var failedHttp = trafficState.items.filter(function (r) { return r.status >= 400 || r.status === 0; }).slice(-10);
       var recentHttp = trafficState.items.slice(-8);
-      md.push("## 3. Tráfico HTTP / API (" + failedHttp.length + " peticiones fallidas 4xx/5xx)");
+      md.push("## 3. Tráfico HTTP / API por Versión (" + failedHttp.length + " peticiones fallidas 4xx/5xx)");
       if (failedHttp.length) {
         md.push("### Peticiones con error (4xx / 5xx):");
         failedHttp.forEach(function (r) {
+          var tierTag = getDeviceTierTag(r.device_id);
           md.push(
-            "- **" + r.method + " " + r.url + "** → **HTTP " + r.status + "** (" + r.device_name + ", " + r.duration_ms + " ms)",
+            "- **[" + tierTag + " · " + r.device_name + "]** **" + r.method + " " + r.url + "** → **HTTP " + r.status + "** (" + r.duration_ms + " ms)",
             "  - Response Body: `" + ((r.res_body || "").slice(0, 260).replace(/\s+/g, " ") || "vacío") + "`"
           );
         });
@@ -2621,7 +2822,8 @@
       if (recentHttp.length) {
         md.push("### Últimas peticiones HTTP:");
         recentHttp.forEach(function (r) {
-          md.push("- `" + r.method + "` `" + r.path + "` → **" + r.status + "** (" + r.device_name + ", " + r.mime + ", " + r.duration_ms + " ms)");
+          var tierTag = getDeviceTierTag(r.device_id);
+          md.push("- **[" + tierTag + " · " + r.device_name + "]** `" + r.method + "` `" + r.path + "` → **" + r.status + "** (" + r.mime + ", " + r.duration_ms + " ms)");
         });
       } else {
         md.push("_Sin tráfico HTTP registrado._");
@@ -2630,10 +2832,11 @@
     }
 
     if (inc.audit) {
-      md.push("## 4. Auditoría Visual y Responsiva (" + auditState.items.length + " hallazgos)");
+      md.push("## 4. Auditoría Visual y Responsiva (Móvil vs. Desktop · " + auditState.items.length + " hallazgos)");
       if (auditState.items.length) {
         auditState.items.slice(0, 15).forEach(function (a) {
-          md.push("- **[" + a.kind + "]** en **" + a.device_name + "** (`" + a.selector + "`): " + a.summary + " — _" + a.detail + "_");
+          var tierTag = getDeviceTierTag(a.device_id);
+          md.push("- **[" + tierTag + " · " + a.device_name + "]** **[" + a.kind + "]** (`" + a.selector + "`): " + a.summary + " — _" + a.detail + "_");
         });
       } else {
         md.push("_Sin desbordamientos horizontales ni imágenes rotas detectadas._");
@@ -2643,10 +2846,11 @@
 
     if (inc.flow) {
       var recentSteps = flowState.items.slice(-20);
-      md.push("## 5. Rastreador de Interacciones del Usuario (Clics, Scroll, Zona y Sección)");
+      md.push("## 5. Rastreador de Interacciones del Usuario (Clics, Scroll, Zona y Sección en Móvil y Desktop)");
       if (recentSteps.length) {
         recentSteps.forEach(function (st, idx) {
-          md.push(formatFlowStepLine(st, idx + 1));
+          var tierTag = getDeviceTierTag(st.device_id);
+          md.push(formatFlowStepLine(st, idx + 1) + " **[" + tierTag + "]**");
         });
       } else {
         md.push("_Sin interacciones registradas aún._");
@@ -2655,11 +2859,12 @@
     }
 
     if (inc.storage) {
-      md.push("## 6. Estado de Sesión (Cookies, Storage y JWT)");
+      md.push("## 6. Estado de Sesión (Cookies, Storage y JWT por Versión)");
       if (storageState.rows.length) {
         storageState.rows.slice(0, 15).forEach(function (row) {
+          var tierTag = row.device_id === "all" ? "GLOBAL" : getDeviceTierTag(row.device_id);
           var jwtInfo = row.jwt && row.jwt.expStatus ? (" — **JWT: " + row.jwt.expStatus.summary + "**") : "";
-          md.push("- **[" + row.scope + "]** `" + row.key + "` = `" + String(row.value).slice(0, 90) + "` (" + row.device_name + ")" + jwtInfo);
+          md.push("- **[" + tierTag + " · " + row.device_name + "]** **[" + row.scope + "]** `" + row.key + "` = `" + String(row.value).slice(0, 90) + "`" + jwtInfo);
         });
       } else {
         md.push("_Sin cookies ni datos en localStorage/sessionStorage._");
@@ -2677,9 +2882,19 @@
       fetch("/api/inspected", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch("/api/audit", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch("/api/flow?since=0", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/storage", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+      fetch("/api/storage", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/templates", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
     ]).then(function (results) {
-      if (results[0] && results[0].item) lastInspectedElement = results[0].item;
+      if (results[0]) {
+        if (results[0].item) lastInspectedElement = results[0].item;
+        if (results[0].by_tier) {
+          if (results[0].by_tier.mobile) inspectedByTier.mobile = results[0].by_tier.mobile;
+          if (results[0].by_tier.desktop) inspectedByTier.desktop = results[0].by_tier.desktop;
+        }
+        if (results[0].by_device) {
+          inspectedByDevice = results[0].by_device;
+        }
+      }
       if (results[1] && Array.isArray(results[1].items)) {
         auditState.items = results[1].items;
         updateAuditBadge();
@@ -2690,6 +2905,11 @@
       }
       if (results[3] && Array.isArray(results[3].items)) {
         buildStorageRowsFromItems(results[3].items);
+      }
+      if (results[4] && Array.isArray(results[4].items)) {
+        results[4].items.forEach(function (it) {
+          templatesByDevice[it.device_id] = it;
+        });
       }
 
       var reportMd = buildAiMarkdownReport();

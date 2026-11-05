@@ -520,6 +520,8 @@
     var selector = getSelector(target);
     var html = target.outerHTML;
     var diag = extractElementDiagnostics(target, r);
+    var secName = typeof getSemanticSection === "function" ? getSemanticSection(target) : "";
+    var elText = (target.innerText || target.getAttribute("aria-label") || target.getAttribute("title") || target.getAttribute("placeholder") || target.value || "").replace(/\s+/g, " ").trim().slice(0, 80);
 
     try {
       parent.postMessage({
@@ -529,12 +531,24 @@
         url: getCurrentPageUrl(),
         tag: tag,
         selector: selector,
+        section: secName,
         html: html,
         width: Math.round(r.width),
         height: Math.round(r.height),
         box: diag.box,
         stylesSummary: diag.stylesSummary,
-        stylesMap: diag.stylesMap
+        stylesMap: diag.stylesMap,
+        identifiers: {
+          id: target.id || "",
+          testid: target.getAttribute("data-testid") || target.getAttribute("data-cy") || target.getAttribute("data-test") || "",
+          name: target.getAttribute("name") || "",
+          role: target.getAttribute("role") || "",
+          href: target.getAttribute("href") || "",
+          text: elText,
+          tag: tag,
+          selector: selector,
+          section: secName
+        }
       }, ORIGIN);
     } catch (_e) {}
   }
@@ -928,6 +942,8 @@
       }, ORIGIN);
     } catch (_e) {}
 
+    setTimeout(reportTemplateContext, 200);
+
     if (!syncActive) return;
 
     try {
@@ -1175,6 +1191,12 @@
     } else if (d.type === "rv:run_diagnostics") {
       runVisualAudit(!!d.highlight);
       reportStorageSnapshot();
+      reportTemplateContext();
+    } else if (d.type === "rv:request_storage") {
+      reportStorageSnapshot();
+      reportTemplateContext();
+    } else if (d.type === "rv:find_counterpart") {
+      handleFindCounterpart(d.identifiers || {});
     } else if (d.type === "rv:set_audit_highlight") {
       auditHighlightEnabled = !!d.active;
       if (auditHighlightEnabled) {
@@ -1551,10 +1573,242 @@
     } catch (_e) {}
   }
 
+  // ---------- 7. Comparador de Templates (Versión Móvil vs Versión Desktop) ----------
+  function buildDomOutline() {
+    if (!document.body) return "";
+    var lines = [];
+    var topChildren = document.body.children;
+    for (var i = 0; i < topChildren.length && lines.length < 28; i++) {
+      var c = topChildren[i];
+      var tag = (c.tagName || "").toLowerCase();
+      if (tag === "script" || tag === "style" || tag === "link" || tag === "noscript" || c === overlayEl) continue;
+      if (c.classList && c.classList.contains("__rv_audit_marker")) continue;
+      var cs = window.getComputedStyle(c);
+      var visNote = (cs.display === "none" || cs.visibility === "hidden") ? " [OCULTO: display:none]" : "";
+      lines.push("- " + openTagStr(c, 3) + visNote);
+
+      if (!visNote && c.children && c.children.length) {
+        var subCount = 0;
+        for (var j = 0; j < c.children.length && subCount < 6; j++) {
+          var sub = c.children[j];
+          var sTag = (sub.tagName || "").toLowerCase();
+          if (sTag === "script" || sTag === "style") continue;
+          var sCs = window.getComputedStyle(sub);
+          var sVis = (sCs.display === "none" || sCs.visibility === "hidden") ? " [OCULTO]" : "";
+          lines.push("  - " + openTagStr(sub, 2) + sVis);
+          subCount++;
+        }
+      }
+    }
+    return lines.join("\n");
+  }
+
+  function detectActiveModalInfo() {
+    if (!document.body) return null;
+    var vw = Math.max(1, document.documentElement.clientWidth || window.innerWidth || 1);
+    var vh = Math.max(1, document.documentElement.clientHeight || window.innerHeight || 1);
+    var candidates = document.body.querySelectorAll("dialog[open], [aria-modal='true'], [role='dialog'], [role='alertdialog'], .modal, .drawer, .popup, .dialog");
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      var cs = window.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) <= 0.02) continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < 40 || r.height < 40 || r.bottom <= 0 || r.top >= vh) continue;
+      return {
+        selector: getSelector(el, false),
+        title: extractLandmarkHeading(el) || "Modal / Diálogo activo",
+        box: Math.round(r.width) + "×" + Math.round(r.height) + "px",
+        html: (el.outerHTML || "").slice(0, 1200)
+      };
+    }
+    return null;
+  }
+
+  function reportTemplateContext() {
+    try {
+      if (!document.body) return;
+      var bodySig = openTagStr(document.body, 5);
+      var roots = [];
+      var ch = document.body.children;
+      for (var i = 0; i < ch.length && roots.length < 10; i++) {
+        var el = ch[i];
+        var t = (el.tagName || "").toLowerCase();
+        if (t === "script" || t === "style" || t === "link" || t === "noscript" || el === overlayEl) continue;
+        if (el.classList && el.classList.contains("__rv_audit_marker")) continue;
+        var cs = window.getComputedStyle(el);
+        if (cs.display === "none") continue;
+        roots.push(getSelector(el, false));
+      }
+
+      var sheets = [];
+      var links = document.querySelectorAll("link[rel='stylesheet']");
+      for (var k = 0; k < links.length && sheets.length < 12; k++) {
+        var href = links[k].getAttribute("href") || "";
+        if (href) {
+          var cleanHref = href.split("?")[0].split("/").slice(-2).join("/");
+          sheets.push(cleanHref);
+        }
+      }
+
+      var landmarks = [];
+      var lEls = document.body.querySelectorAll("header, nav, main, aside, footer, form, section, [role='dialog'], dialog[open]");
+      for (var m = 0; m < lEls.length && landmarks.length < 14; m++) {
+        var le = lEls[m];
+        var lcs = window.getComputedStyle(le);
+        if (lcs.display === "none" || lcs.visibility === "hidden") continue;
+        var lr = le.getBoundingClientRect();
+        if (lr.width < 5 || lr.height < 5) continue;
+        var hTxt = extractLandmarkHeading(le);
+        landmarks.push(
+          "<" + le.tagName.toLowerCase() + (le.id ? "#" + le.id : "") + ">" +
+          (hTxt ? (' "' + hTxt + '"') : "") +
+          " (" + Math.round(lr.width) + "×" + Math.round(lr.height) + "px)"
+        );
+      }
+
+      parent.postMessage({
+        type: "rv:template_context",
+        frame: F,
+        device: D,
+        url: getCurrentPageUrl(),
+        title: document.title || "",
+        bodySignature: bodySig,
+        rootContainers: roots,
+        stylesheets: sheets,
+        landmarks: landmarks,
+        activeModal: detectActiveModalInfo(),
+        domOutline: buildDomOutline()
+      }, ORIGIN);
+    } catch (_e) {}
+  }
+
+  function handleFindCounterpart(ident) {
+    try {
+      if (!document.body || !ident) return;
+      var matched = null;
+      var matchedBy = "";
+
+      // 1. Por ID exacto
+      if (ident.id) {
+        var byId = document.getElementById(ident.id);
+        if (byId) {
+          matched = byId;
+          matchedBy = "id (#" + ident.id + ")";
+        }
+      }
+      // 2. Por data-testid / data-cy
+      if (!matched && ident.testid) {
+        try {
+          var byTest = document.querySelector('[data-testid="' + safeIdent(ident.testid) + '"], [data-cy="' + safeIdent(ident.testid) + '"]');
+          if (byTest) {
+            matched = byTest;
+            matchedBy = "data-testid (" + ident.testid + ")";
+          }
+        } catch (_e) {}
+      }
+      // 3. Por selector CSS exacto
+      if (!matched && ident.selector) {
+        try {
+          var bySel = document.querySelector(ident.selector);
+          if (bySel) {
+            matched = bySel;
+            matchedBy = "selector exacto (" + ident.selector + ")";
+          }
+        } catch (_e) {}
+      }
+      // 4. Por atributo name
+      if (!matched && ident.name) {
+        try {
+          var byName = document.querySelector((ident.tag || "*") + '[name="' + safeIdent(ident.name) + '"]');
+          if (byName) {
+            matched = byName;
+            matchedBy = "atributo name (" + ident.name + ")";
+          }
+        } catch (_e) {}
+      }
+      // 5. Por texto visible / etiqueta en el mismo tipo de elemento o botón/enlace equivalente
+      if (!matched && ident.text && ident.text.length >= 2) {
+        var queryTags = ident.tag ? (ident.tag + ", button, a, [role='button'], h1, h2, h3, label") : "button, a, [role='button'], h1, h2, h3, label";
+        var candidates = document.body.querySelectorAll(queryTags);
+        var normTarget = ident.text.toLowerCase();
+        for (var i = 0; i < candidates.length; i++) {
+          var c = candidates[i];
+          var cTxt = (c.innerText || c.getAttribute("aria-label") || c.getAttribute("placeholder") || c.value || "").replace(/\s+/g, " ").trim().toLowerCase();
+          if (cTxt === normTarget && isVisible(c)) {
+            matched = c;
+            matchedBy = 'texto equivalente ("' + ident.text.slice(0, 40) + '")';
+            break;
+          }
+        }
+      }
+      // 6. Por enlace href
+      if (!matched && ident.href) {
+        var links = document.body.querySelectorAll("a[href]");
+        for (var j = 0; j < links.length; j++) {
+          if (links[j].getAttribute("href") === ident.href) {
+            matched = links[j];
+            matchedBy = "href (" + ident.href + ")";
+            break;
+          }
+        }
+      }
+
+      if (matched) {
+        var r = matched.getBoundingClientRect();
+        var diag = extractElementDiagnostics(matched, r);
+        var cs = window.getComputedStyle(matched);
+        var isHiddenInThisTemplate = (cs.display === "none" || cs.visibility === "hidden" || (r.width === 0 && r.height === 0));
+        parent.postMessage({
+          type: "rv:counterpart_found",
+          frame: F,
+          device: D,
+          url: getCurrentPageUrl(),
+          tag: matched.tagName.toLowerCase(),
+          selector: getSelector(matched, false),
+          section: getSemanticSection(matched),
+          html: matched.outerHTML,
+          width: Math.round(r.width),
+          height: Math.round(r.height),
+          box: diag.box,
+          stylesSummary: (isHiddenInThisTemplate ? "[OCULTO EN ESTE TEMPLATE] " : "") + diag.stylesSummary,
+          stylesMap: diag.stylesMap,
+          isCounterpart: true,
+          matchedBy: matchedBy + (isHiddenInThisTemplate ? " — oculto en este viewport/template" : ""),
+          notFoundInTemplate: false
+        }, ORIGIN);
+      } else {
+        // El elemento no existe en este template (ej. template exclusivo para móvil vs desktop):
+        // enviamos la estructura raíz de este template para que la IA vea ambos templates
+        var fallbackRoot = document.querySelector("main, [role='main'], form, header, body") || document.body;
+        var fr = fallbackRoot.getBoundingClientRect();
+        var fDiag = extractElementDiagnostics(fallbackRoot, fr);
+        parent.postMessage({
+          type: "rv:counterpart_found",
+          frame: F,
+          device: D,
+          url: getCurrentPageUrl(),
+          tag: fallbackRoot.tagName.toLowerCase(),
+          selector: getSelector(fallbackRoot, false),
+          section: getSemanticSection(fallbackRoot),
+          html: buildDomOutline(),
+          width: Math.round(fr.width),
+          height: Math.round(fr.height),
+          box: fDiag.box,
+          stylesSummary: fDiag.stylesSummary,
+          stylesMap: fDiag.stylesMap,
+          isCounterpart: true,
+          matchedBy: "Elemento exclusivo del otro template (no existe '" + (ident.selector || ident.tag) + "' en este DOM)",
+          notFoundInTemplate: true
+        }, ORIGIN);
+      }
+    } catch (_e) {}
+  }
+
   window.addEventListener("load", function () {
     setTimeout(function () {
       runVisualAudit();
       reportStorageSnapshot();
+      reportTemplateContext();
     }, 500);
   });
 })();
