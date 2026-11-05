@@ -25,12 +25,13 @@
 
   var STORE_URL = "rv.url", STORE_DEVICES = "rv.devices", STORE_ZOOM = "rv.zoom", STORE_SYNC = "rv.sync";
 
-  // ---------- Estado ----------
+  // Estado
   var state = {
     active: [],        // ids de dispositivos en la mesa, en orden
     url: "",           // URL escrita en Buscar
     frameUrls: {},     // URL actual de cada pantalla (si el usuario navegó dentro)
     zoomMode: "fill",  // "fill" (aprovechar ventana), "fit" (ajustar todo) o un número fijo
+    stackMode: "auto", // "auto" (vertical si H > W, si no óptimo) o "stack" (forzar 1 por fila)
     scale: 1,          // zoom que se está mostrando ahora
     inspector: false,  // modo selector de elementos
     sync: true         // sincronizar scroll, clics y escritura entre pantallas
@@ -47,6 +48,7 @@
   var zoomOutBtn = document.getElementById("zoom-out");
   var zoomFitBtn = document.getElementById("zoom-fit");
   var zoomFillBtn = document.getElementById("zoom-fill");
+  var stackBtn = document.getElementById("stack-btn");
   var form = document.getElementById("search-form");
   var input = document.getElementById("url-input");
   var refreshBtn = document.getElementById("refresh-btn");
@@ -457,10 +459,25 @@
 
     var best = null;
     var isFill = state.zoomMode === "fill";
+    var isPortraitStage = H > W * 1.05;
+    var forceVerticalStack = state.stackMode === "stack";
 
     for (var r = 1; r <= n; r++) {
+      // Si el usuario activó el modo Apilar/Vertical (o está en un monitor vertical con pantallas anchas),
+      // priorizamos acomodar las pantallas una debajo de otra para aprovechar el ancho completo del monitor vertical.
+      if (forceVerticalStack && r < n) continue;
+
       var rows = partitionRows(devices, r, vW);
       if (rows.length !== r) continue;
+
+      // En monitores verticales (portrait), evitamos poner múltiples dispositivos de escritorio/laptop en la misma fila
+      // porque al ser pantallas horizontales (16:9) se encogerían a la mitad de su ancho innecesariamente.
+      if (!forceVerticalStack && isPortraitStage && r < n) {
+        var hasMultiWideInRow = rows.some(function (row) {
+          return row.length > 1 && row.some(function (d) { return d.width >= 1000 || d.kind === "desktop"; });
+        });
+        if (hasMultiWideInRow) continue;
+      }
 
       var sCandidate = 2.0;
       var sumRowH = 0;
@@ -471,7 +488,14 @@
         sumRowH += Math.max.apply(null, row.map(vH));
       });
       var freeH = H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y;
-      sCandidate = Math.min(sCandidate, freeH / sumRowH);
+      // En modo Fill sobre monitores verticales o apilado vertical, permitimos que las filas aprovechen el ancho
+      // completo aunque la altura total supere ligeramente el alto visible (permitiendo scroll vertical suave).
+      var heightFit = freeH / sumRowH;
+      if ((isFill && isPortraitStage && r > 1) || forceVerticalStack) {
+        sCandidate = Math.min(sCandidate, Math.max(heightFit, sCandidate * 0.92));
+      } else {
+        sCandidate = Math.min(sCandidate, heightFit);
+      }
 
       if (!best || sCandidate > best.s) {
         best = { s: sCandidate, rows: rows, freeH: freeH, sumRowH: sumRowH };
@@ -484,6 +508,7 @@
     } else {
       s = state.zoomMode;
     }
+    state.isAutoVertical = isPortraitStage && best.rows.length === n && n > 1;
     setZoom(s);
 
     // En modo Fill, si hay varias filas y una fila es más angosta que el ancho disponible,
@@ -499,6 +524,11 @@
       var maxRowHAllowed = maxH * s + extraHPerRow;
       var sByW = sumW > 0 ? (freeW / sumW) : s;
       var sByH = maxH > 0 ? (maxRowHAllowed / maxH) : s;
+      // En monitor vertical con dispositivos apilados (1 por fila), cada pantalla aprovecha su propio ancho al 100%
+      if ((isPortraitStage || forceVerticalStack) && row.length === 1) {
+        var maxVerticalBoost = forceVerticalStack ? sByW : Math.min(sByW, sByH * 1.15);
+        return Math.max(s, Math.min(2.0, maxVerticalBoost));
+      }
       return Math.max(s, Math.min(s * 1.28, sByW, sByH));
     });
 
@@ -588,6 +618,11 @@
       zoomFillBtn.setAttribute("aria-pressed", state.zoomMode === "fill" ? "true" : "false");
       zoomFillBtn.title = t("zoomFillTitle");
     }
+    if (stackBtn) {
+      var isStacked = state.stackMode === "stack" || !!state.isAutoVertical;
+      stackBtn.setAttribute("aria-pressed", isStacked ? "true" : "false");
+      stackBtn.title = t("stackModeTitle");
+    }
     zoomOutBtn.disabled = s <= ZOOM_MIN + 0.001;
     zoomInBtn.disabled = s >= ZOOM_MAX - 0.001;
     var label;
@@ -638,10 +673,22 @@
     stage.scrollLeft = stage.scrollTop = 0;
   }
 
+  function toggleStackMode() {
+    if (state.stackMode === "stack" || state.isAutoVertical) {
+      state.stackMode = state.stackMode === "stack" ? "auto" : "stack";
+    } else {
+      state.stackMode = "stack";
+    }
+    try { sessionStorage.setItem("rv.tab.stack", state.stackMode); } catch (_e) {}
+    layout();
+    stage.scrollLeft = stage.scrollTop = 0;
+  }
+
   zoomInBtn.addEventListener("click", function () { stepZoom(1); });
   zoomOutBtn.addEventListener("click", function () { stepZoom(-1); });
   zoomFitBtn.addEventListener("click", fitZoom);
   if (zoomFillBtn) zoomFillBtn.addEventListener("click", fillZoom);
+  if (stackBtn) stackBtn.addEventListener("click", toggleStackMode);
 
   // ⌘/Ctrl + y ⌘/Ctrl − hacen zoom en el visor en lugar de en Chrome.
   function onZoomKey(ev) {
@@ -1851,6 +1898,11 @@
   var savedZoom = load(STORE_ZOOM);
   if (savedZoom === "fit" || savedZoom === "fill") state.zoomMode = savedZoom;
   else if (typeof savedZoom === "number" && savedZoom >= ZOOM_MIN && savedZoom <= ZOOM_MAX) state.zoomMode = savedZoom;
+
+  try {
+    var savedStack = sessionStorage.getItem("rv.tab.stack");
+    if (savedStack === "stack" || savedStack === "auto") state.stackMode = savedStack;
+  } catch (_e) {}
 
   layout();
   if (window.ResizeObserver) new ResizeObserver(layout).observe(stage);

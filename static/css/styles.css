@@ -1121,7 +1121,44 @@ body.is-traffic-standalone #traffic-close-btn {
   border-color: #1557b0;
 }
 
-/* ---------- Pantallas pequeñas ---------- */
+/* ---------- Monitores verticales (Portrait ~1080px) y Pantallas pequeñas ---------- */
+
+@media (max-width: 1200px) {
+  .ruler {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    column-gap: 8px;
+    padding: 14px 12px 10px;
+  }
+  .bar {
+    height: 40px;
+  }
+  .bar-search {
+    flex: 1 1 320px;
+  }
+  .btn {
+    padding: 0 12px;
+    font-size: 14px;
+  }
+  .btn-refresh-hint {
+    display: none;
+  }
+  .mat-legend {
+    display: none;
+  }
+  .traffic-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .traffic-split {
+    grid-template-columns: 1fr;
+    grid-template-rows: 52% 48%;
+  }
+  .traffic-table-wrap {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  }
+}
 
 @media (max-width: 760px) {
   :root { --ruler-h: 220px; }

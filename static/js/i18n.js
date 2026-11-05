@@ -85,7 +85,9 @@
       consoleEmpty: "No console messages or errors captured yet.",
       consoleSelectHint: "Select any log or error from the list to inspect its full details and stack trace.",
       consoleCopy: "Copy Log / Error",
-      copiedConsole: "Console message copied!"
+      copiedConsole: "Console message copied!",
+      stackMode: "Stack",
+      stackModeTitle: "Stack screens vertically (ideal for vertical/portrait monitors)"
     },
     es: {
       screens: "Pantallas",
@@ -167,7 +169,9 @@
       consoleEmpty: "Aún no hay eventos ni errores de consola capturados.",
       consoleSelectHint: "Selecciona un evento de consola para ver su detalle completo o stack trace.",
       consoleCopy: "Copiar Log / Error",
-      copiedConsole: "¡Evento de consola copiado!"
+      copiedConsole: "¡Evento de consola copiado!",
+      stackMode: "Vertical",
+      stackModeTitle: "Apilar pantallas una debajo de otra (ideal para monitores verticales)"
     }
   };
 
