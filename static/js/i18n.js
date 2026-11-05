@@ -75,7 +75,11 @@
       trafficSelectHint: "Select any request from the table to inspect its raw HTTP Request & Response.",
       copiedReq: "Raw HTTP Request copied!",
       copiedRes: "Raw HTTP Response copied!",
-      copiedCurl: "cURL command copied!"
+      copiedCurl: "cURL command copied!",
+      popoutDevice: "Move {name} to another window/monitor",
+      popoutGroup: "New window ↗",
+      trafficPopout: "Detach window ↗",
+      trafficPopoutHint: "Open HTTP Traffic in an independent movable window"
     },
     es: {
       screens: "Pantallas",
@@ -147,7 +151,11 @@
       trafficSelectHint: "Selecciona una petición de la tabla para inspeccionar su Request y Response crudo.",
       copiedReq: "¡HTTP Request copiado!",
       copiedRes: "¡HTTP Response copiado!",
-      copiedCurl: "¡Comando cURL copiado!"
+      copiedCurl: "¡Comando cURL copiado!",
+      popoutDevice: "Enviar {name} a otra ventana/monitor",
+      popoutGroup: "Otra ventana ↗",
+      trafficPopout: "Ventana independiente ↗",
+      trafficPopoutHint: "Sacar el tráfico HTTP en una ventana independiente para otro monitor"
     }
   };
 

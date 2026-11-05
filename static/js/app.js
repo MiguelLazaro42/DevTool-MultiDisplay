@@ -78,6 +78,7 @@
   var trafficDeviceFilter = document.getElementById("traffic-device-filter");
   var trafficPauseBtn = document.getElementById("traffic-pause-btn");
   var trafficClearBtn = document.getElementById("traffic-clear-btn");
+  var trafficPopoutBtn = document.getElementById("traffic-popout-btn");
   var trafficCloseBtn = document.getElementById("traffic-close-btn");
   var trafficTbody = document.getElementById("traffic-tbody");
   var trafficEmpty = document.getElementById("traffic-empty");
@@ -99,12 +100,31 @@
     searchQuery: ""
   };
 
+  // Canal de sincronización entre múltiples pestañas / monitores (BroadcastChannel)
+  var TAB_ID = "tab_" + Math.random().toString(36).slice(2, 9);
+  var SESSION_DEVICES = "rv.tab.devices";
+  var syncChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("rv_multidisplay_sync") : null;
+
+  function postCrossTab(msg) {
+    if (!syncChannel) return;
+    try {
+      msg.tabId = TAB_ID;
+      syncChannel.postMessage(msg);
+    } catch (_e) {}
+  }
+
   // ---------- Utilidades ----------
   function store(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (_e) {}
   }
   function load(key) {
     try { var v = localStorage.getItem(key); return v ? JSON.parse(v) : null; } catch (_e) { return null; }
+  }
+  function storeTabDevices(list) {
+    try { sessionStorage.setItem(SESSION_DEVICES, JSON.stringify(list)); } catch (_e) {}
+  }
+  function loadTabDevices() {
+    try { var v = sessionStorage.getItem(SESSION_DEVICES); return v ? JSON.parse(v) : null; } catch (_e) { return null; }
   }
 
   var toastTimer;
@@ -206,6 +226,13 @@
     var dpr = document.createElement("span");
     dpr.className = "device-dpr";
     dpr.textContent = formatDpr(d.dpr);
+
+    var popout = document.createElement("button");
+    popout.type = "button";
+    popout.className = "device-popout";
+    popout.appendChild(icon(["M7 13 13 7", "M8 7h5v5"]));
+    popout.addEventListener("click", function () { popoutDevices([id], true); });
+
     var remove = document.createElement("button");
     remove.type = "button";
     remove.className = "device-remove";
@@ -215,18 +242,32 @@
     caption.appendChild(name);
     caption.appendChild(size);
     caption.appendChild(dpr);
+    body.appendChild(popout);
     body.appendChild(remove);
 
     root.appendChild(body);
     root.appendChild(caption);
     rack.appendChild(root);
 
-    els[id] = { root: root, screen: screen, iframe: iframe, placeholder: placeholder, remove: remove, sizeEl: size };
+    els[id] = { root: root, screen: screen, iframe: iframe, placeholder: placeholder, remove: remove, popout: popout, sizeEl: size };
     translateDevice(id);
     requestAnimationFrame(function () {
       requestAnimationFrame(function () { root.classList.remove("is-entering"); });
     });
     return els[id];
+  }
+
+  function popoutDevices(deviceIds, removeFromCurrent) {
+    if (!deviceIds || !deviceIds.length) return;
+    var u = new URL(location.origin + "/");
+    u.searchParams.set("devices", deviceIds.join(","));
+    if (state.url) u.searchParams.set("url", state.url);
+    window.open(u.href, "_blank");
+    if (removeFromCurrent && state.active.length > deviceIds.length) {
+      deviceIds.forEach(function (id) {
+        if (state.active.indexOf(id) > -1) toggleDevice(id, false);
+      });
+    }
   }
 
   function translateDevice(id) {
@@ -235,6 +276,10 @@
     e.iframe.title = t("frameTitle", { name: name });
     e.remove.setAttribute("aria-label", t("remove", { name: name }));
     e.remove.title = t("remove", { name: name });
+    if (e.popout) {
+      e.popout.setAttribute("aria-label", t("popoutDevice", { name: name }));
+      e.popout.title = t("popoutDevice", { name: name });
+    }
   }
 
   function navigateFrame(id, url, bust) {
@@ -266,6 +311,7 @@
       delete state.frameUrls[id];
     }
     store(STORE_DEVICES, state.active);
+    storeTabDevices(state.active);
     syncMenu();
     layout();
   }
@@ -633,6 +679,14 @@
         }, location.origin);
       } catch (_e) {}
     });
+    if (state.sync) {
+      postCrossTab({
+        type: "bc:sync_scroll",
+        dx: dx,
+        dy: dy,
+        force: true
+      });
+    }
   }
 
   // Para recorrer el tapete cuando el zoom no cabe: arrastrar el fondo.
@@ -702,6 +756,9 @@
     store(STORE_URL, url);
     if (!state.active.length) toast(t("toastNoDevices"));
     state.active.forEach(function (id) { navigateFrame(id, url); });
+    if (state.sync) {
+      postCrossTab({ type: "bc:load_url", url: url });
+    }
   });
 
   // ---------- Refrescar (borra cookies) ----------
@@ -732,6 +789,9 @@
         state.active.forEach(function (id) {
           navigateFrame(id, state.frameUrls[id] || state.url, true);
         });
+        if (state.sync) {
+          postCrossTab({ type: "bc:reload" });
+        }
         toast(t("toastCleared"));
       })
       .catch(function () {
@@ -764,8 +824,10 @@
     if (d.type === "rv:navigated") {
       if (els[d.frame]) state.frameUrls[d.frame] = d.url;
       fetchTraffic();
+      postCrossTab({ type: "bc:traffic_ping" });
     } else if (d.type === "rv:traffic_ping") {
       fetchTraffic();
+      postCrossTab({ type: "bc:traffic_ping" });
     } else if (d.type === "rv:element_hover") {
       showInspectorHover(d);
     } else if (d.type === "rv:element_leave") {
@@ -776,16 +838,18 @@
       if (state.inspector) toggleInspector(false);
     } else if (d.type === "rv:sync_scroll") {
       if (!state.sync) return;
-      broadcastToOtherFrames(d.frame, {
+      var scrollPayload = {
         type: "rv:do_sync_scroll",
         x: d.x,
         y: d.y,
         dx: d.dx,
         dy: d.dy
-      });
+      };
+      broadcastToOtherFrames(d.frame, scrollPayload);
+      postCrossTab({ type: "bc:sync_scroll", payload: scrollPayload });
     } else if (d.type === "rv:sync_click") {
       if (!state.sync) return;
-      broadcastToOtherFrames(d.frame, {
+      var clickPayload = {
         type: "rv:do_sync_click",
         selector: d.selector,
         structuralSelector: d.structuralSelector,
@@ -795,10 +859,12 @@
         text: d.text,
         href: d.href,
         absHref: d.absHref
-      });
+      };
+      broadcastToOtherFrames(d.frame, clickPayload);
+      postCrossTab({ type: "bc:sync_click", payload: clickPayload });
     } else if (d.type === "rv:sync_input") {
       if (!state.sync) return;
-      broadcastToOtherFrames(d.frame, {
+      var inputPayload = {
         type: "rv:do_sync_input",
         eventType: d.eventType,
         selector: d.selector,
@@ -809,9 +875,55 @@
         value: d.value,
         checked: d.checked,
         inputType: d.inputType
-      });
+      };
+      broadcastToOtherFrames(d.frame, inputPayload);
+      postCrossTab({ type: "bc:sync_input", payload: inputPayload });
     }
   });
+
+  // Recepción de eventos sincronizados desde otros monitores / pestañas
+  if (syncChannel) {
+    syncChannel.addEventListener("message", function (ev) {
+      var msg = ev.data;
+      if (!msg || msg.tabId === TAB_ID) return;
+
+      if (msg.type === "bc:traffic_ping") {
+        fetchTraffic();
+        return;
+      }
+      if (msg.type === "bc:traffic_clear") {
+        trafficState.items = [];
+        trafficState.selectedId = null;
+        if (trafficCountEl) trafficCountEl.textContent = "0";
+        renderTrafficTable();
+        renderTrafficDetail();
+        return;
+      }
+
+      if (!state.sync) return;
+
+      if (msg.type === "bc:load_url" && msg.url) {
+        input.value = msg.url;
+        state.url = msg.url;
+        state.frameUrls = {};
+        state.active.forEach(function (id) { navigateFrame(id, msg.url); });
+      } else if (msg.type === "bc:reload") {
+        clearDocumentCookies();
+        if (state.url) {
+          state.active.forEach(function (id) {
+            navigateFrame(id, state.frameUrls[id] || state.url, true);
+          });
+        }
+      } else if (msg.type === "bc:sync_scroll") {
+        var sp = msg.payload || { type: "rv:do_sync_scroll", dx: msg.dx, dy: msg.dy, force: true };
+        broadcastToOtherFrames(null, sp);
+      } else if (msg.type === "bc:sync_click" && msg.payload) {
+        broadcastToOtherFrames(null, msg.payload);
+      } else if (msg.type === "bc:sync_input" && msg.payload) {
+        broadcastToOtherFrames(null, msg.payload);
+      }
+    });
+  }
 
   // ---------- Sincronización Multi-Dispositivo ----------
   function updateSyncUI() {
@@ -1210,6 +1322,17 @@
       if (trafficCountEl) trafficCountEl.textContent = "0";
       renderTrafficTable();
       renderTrafficDetail();
+      postCrossTab({ type: "bc:traffic_clear" });
+    });
+  }
+  if (trafficPopoutBtn) {
+    trafficPopoutBtn.addEventListener("click", function () {
+      toggleTrafficPanel(false);
+      window.open(
+        location.origin + "/?mode=traffic",
+        "rv_traffic_window",
+        "width=1140,height=680,resizable=yes,scrollbars=yes"
+      );
     });
   }
   if (trafficSearch) {
@@ -1279,12 +1402,30 @@
       var headingId = "menu-group-" + gi;
       group.setAttribute("aria-labelledby", headingId);
 
+      var headingRow = document.createElement("div");
+      headingRow.className = "device-menu-heading-row";
+
       var heading = document.createElement("p");
       heading.className = "device-menu-heading";
       heading.id = headingId;
       heading.dataset.i18n = "group_" + g;
       heading.textContent = t("group_" + g);
-      group.appendChild(heading);
+
+      var groupPopBtn = document.createElement("button");
+      groupPopBtn.type = "button";
+      groupPopBtn.className = "device-menu-popout";
+      groupPopBtn.dataset.i18n = "popoutGroup";
+      groupPopBtn.textContent = t("popoutGroup");
+      groupPopBtn.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        var ids = byGroup[g].map(function (d) { return d.id; });
+        closeMenu(false);
+        popoutDevices(ids, true);
+      });
+
+      headingRow.appendChild(heading);
+      headingRow.appendChild(groupPopBtn);
+      group.appendChild(headingRow);
 
       byGroup[g].forEach(function (d) {
         var item = document.createElement("button");
@@ -1384,14 +1525,26 @@
   I18N.applyStatic();
   syncLangSwitch();
 
-  // También se puede abrir con ?url=ejemplo.com&devices=iphone-se,ipad-mini
+  // También se puede abrir con ?url=ejemplo.com&devices=iphone-se,ipad-mini o ?mode=traffic
   var params = new URLSearchParams(location.search);
+  var paramMode = params.get("mode");
   var paramDevices = params.get("devices");
   var paramUrl = params.get("url");
 
-  var saved = paramDevices ? paramDevices.split(",") : load(STORE_DEVICES);
+  if (paramMode === "traffic") {
+    document.body.classList.add("is-traffic-standalone");
+    document.title = t("trafficTitle") + " — Responsive Viewer";
+    toggleTrafficPanel(true);
+    return;
+  }
+
+  var tabSaved = loadTabDevices();
+  var saved = paramDevices
+    ? paramDevices.split(",")
+    : (Array.isArray(tabSaved) && tabSaved.length ? tabSaved : load(STORE_DEVICES));
   var initial = (Array.isArray(saved) ? saved : DEFAULTS).filter(function (id) { return BY_ID[id]; });
   if (!Array.isArray(saved) || (saved.length && !initial.length)) initial = DEFAULTS.slice();
+  storeTabDevices(initial);
   initial.forEach(function (id) { state.active.push(id); createDevice(id); });
   syncMenu();
 
