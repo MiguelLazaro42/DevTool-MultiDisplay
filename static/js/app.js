@@ -1715,6 +1715,95 @@
     });
   }
 
+  // ---------- Redimensionamiento del panel de Tráfico / Consola (altura y divisor interno) ----------
+  var STORE_PANEL_H = "rv.panel.height";
+  var STORE_SPLIT_COL = "rv.panel.splitCol";
+  var STORE_SPLIT_ROW = "rv.panel.splitRow";
+  var trafficResizerTop = document.getElementById("traffic-resizer-top");
+  var splitResizers = Array.prototype.slice.call(document.querySelectorAll(".traffic-split-resizer"));
+
+  (function restorePanelSizes() {
+    var savedH = load(STORE_PANEL_H);
+    if (typeof savedH === "number" && savedH >= 120 && trafficPanel) {
+      trafficPanel.style.setProperty("--traffic-h", savedH + "px");
+    }
+    var savedCol = load(STORE_SPLIT_COL);
+    if (typeof savedCol === "number" && savedCol >= 20 && savedCol <= 80 && trafficPanel) {
+      trafficPanel.style.setProperty("--traffic-split-col", savedCol + "%");
+    }
+    var savedRow = load(STORE_SPLIT_ROW);
+    if (typeof savedRow === "number" && savedRow >= 20 && savedRow <= 80 && trafficPanel) {
+      trafficPanel.style.setProperty("--traffic-split-row", savedRow + "%");
+    }
+  })();
+
+  if (trafficResizerTop && trafficPanel) {
+    trafficResizerTop.addEventListener("pointerdown", function (ev) {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      var startY = ev.clientY;
+      var startH = trafficPanel.getBoundingClientRect().height;
+      trafficResizerTop.setPointerCapture(ev.pointerId);
+      document.body.classList.add("is-resizing-panel");
+
+      function onMove(e) {
+        var delta = startY - e.clientY;
+        var maxH = Math.max(200, window.innerHeight - 110);
+        var nextH = Math.round(Math.min(maxH, Math.max(120, startH + delta)));
+        trafficPanel.style.setProperty("--traffic-h", nextH + "px");
+        layout();
+      }
+      function onUp(e) {
+        trafficResizerTop.removeEventListener("pointermove", onMove);
+        trafficResizerTop.removeEventListener("pointerup", onUp);
+        trafficResizerTop.removeEventListener("pointercancel", onUp);
+        document.body.classList.remove("is-resizing-panel");
+        var finalH = Math.round(trafficPanel.getBoundingClientRect().height);
+        store(STORE_PANEL_H, finalH);
+        layout();
+      }
+      trafficResizerTop.addEventListener("pointermove", onMove);
+      trafficResizerTop.addEventListener("pointerup", onUp);
+      trafficResizerTop.addEventListener("pointercancel", onUp);
+    });
+  }
+
+  splitResizers.forEach(function (resizer) {
+    resizer.addEventListener("pointerdown", function (ev) {
+      if (ev.button !== 0 || !trafficPanel) return;
+      ev.preventDefault();
+      var splitContainer = resizer.parentElement;
+      if (!splitContainer) return;
+      resizer.setPointerCapture(ev.pointerId);
+      document.body.classList.add("is-resizing-split");
+
+      function onMove(e) {
+        var rect = splitContainer.getBoundingClientRect();
+        var isVerticalSplit = window.innerWidth <= 1200;
+        if (isVerticalSplit) {
+          var pctY = ((e.clientY - rect.top) / Math.max(1, rect.height)) * 100;
+          var clampedY = Math.round(Math.min(82, Math.max(18, pctY)) * 10) / 10;
+          trafficPanel.style.setProperty("--traffic-split-row", clampedY + "%");
+          store(STORE_SPLIT_ROW, clampedY);
+        } else {
+          var pctX = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+          var clampedX = Math.round(Math.min(82, Math.max(18, pctX)) * 10) / 10;
+          trafficPanel.style.setProperty("--traffic-split-col", clampedX + "%");
+          store(STORE_SPLIT_COL, clampedX);
+        }
+      }
+      function onUp() {
+        resizer.removeEventListener("pointermove", onMove);
+        resizer.removeEventListener("pointerup", onUp);
+        resizer.removeEventListener("pointercancel", onUp);
+        document.body.classList.remove("is-resizing-split");
+      }
+      resizer.addEventListener("pointermove", onMove);
+      resizer.addEventListener("pointerup", onUp);
+      resizer.addEventListener("pointercancel", onUp);
+    });
+  });
+
   setInterval(function () {
     fetchTraffic();
     fetchConsole();
