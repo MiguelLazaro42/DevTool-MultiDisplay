@@ -68,29 +68,42 @@
   var inspectClose = document.getElementById("inspect-close");
   var copiedPillTimer = null;
 
-  // Elementos del Panel de Tráfico HTTP (estilo Burp Suite)
+  // Elementos del Panel de Tráfico HTTP y Consola (estilo Burp Suite + DevTools)
   var trafficBtn = document.getElementById("traffic-btn");
   var trafficCountEl = document.getElementById("traffic-count");
+  var consoleBtn = document.getElementById("console-btn");
+  var consoleCountEl = document.getElementById("console-count");
   var trafficPanel = document.getElementById("traffic-panel");
   var trafficDot = document.getElementById("traffic-dot");
+  var panelModeTraffic = document.getElementById("panel-mode-traffic");
+  var panelModeConsole = document.getElementById("panel-mode-console");
   var trafficSearch = document.getElementById("traffic-search");
   var trafficMethodPills = document.getElementById("traffic-method-pills");
+  var consoleLevelPills = document.getElementById("console-level-pills");
   var trafficDeviceFilter = document.getElementById("traffic-device-filter");
   var trafficPauseBtn = document.getElementById("traffic-pause-btn");
   var trafficClearBtn = document.getElementById("traffic-clear-btn");
   var trafficPopoutBtn = document.getElementById("traffic-popout-btn");
   var trafficRulerPopout = document.getElementById("traffic-ruler-popout");
   var trafficCloseBtn = document.getElementById("traffic-close-btn");
+  var trafficSplitView = document.getElementById("traffic-split-view");
   var trafficTbody = document.getElementById("traffic-tbody");
   var trafficEmpty = document.getElementById("traffic-empty");
   var trafficRawCode = document.getElementById("traffic-raw-code");
   var trafficCopyReq = document.getElementById("traffic-copy-req");
   var trafficCopyRes = document.getElementById("traffic-copy-res");
   var trafficCopyCurl = document.getElementById("traffic-copy-curl");
-  var trafficTabs = Array.prototype.slice.call(document.querySelectorAll(".traffic-tab"));
+  var trafficTabs = Array.prototype.slice.call(document.querySelectorAll("#traffic-split-view .traffic-tab"));
+
+  var consoleSplitView = document.getElementById("console-split-view");
+  var consoleTbody = document.getElementById("console-tbody");
+  var consoleEmpty = document.getElementById("console-empty");
+  var consoleRawCode = document.getElementById("console-raw-code");
+  var consoleCopyBtn = document.getElementById("console-copy-btn");
 
   var trafficState = {
     open: false,
+    panelMode: "traffic",
     paused: false,
     lastSeq: 0,
     items: [],
@@ -100,6 +113,14 @@
     methodFilter: "all",
     deviceFilter: "all",
     searchQuery: ""
+  };
+
+  var consoleState = {
+    lastSeq: 0,
+    items: [],
+    selectedId: null,
+    userPinned: false,
+    levelFilter: "all"
   };
 
   // Canal de sincronización entre múltiples pestañas / monitores (BroadcastChannel)
@@ -830,6 +851,16 @@
     } else if (d.type === "rv:traffic_ping") {
       fetchTraffic();
       postCrossTab({ type: "bc:traffic_ping" });
+    } else if (d.type === "rv:console_event") {
+      fetch("/api/console", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(d)
+      }).then(function () {
+        fetchConsole();
+        postCrossTab({ type: "bc:console_ping" });
+      }).catch(function () {});
     } else if (d.type === "rv:element_hover") {
       showInspectorHover(d);
     } else if (d.type === "rv:element_leave") {
@@ -893,12 +924,24 @@
         fetchTraffic();
         return;
       }
+      if (msg.type === "bc:console_ping") {
+        fetchConsole();
+        return;
+      }
       if (msg.type === "bc:traffic_clear") {
         trafficState.items = [];
         trafficState.selectedId = null;
         if (trafficCountEl) trafficCountEl.textContent = "0";
         renderTrafficTable();
         renderTrafficDetail();
+        return;
+      }
+      if (msg.type === "bc:console_clear") {
+        consoleState.items = [];
+        consoleState.selectedId = null;
+        updateConsoleBadge();
+        renderConsoleTable();
+        renderConsoleDetail();
         return;
       }
 
@@ -1261,7 +1304,7 @@
         if ((!trafficState.selectedId || !trafficState.userPinned) && trafficState.items.length) {
           trafficState.selectedId = trafficState.items[trafficState.items.length - 1].id;
         }
-        if (trafficState.open) {
+        if (trafficState.open && trafficState.panelMode === "traffic") {
           renderTrafficTable(true);
           renderTrafficDetail();
         }
@@ -1272,19 +1315,203 @@
       });
   }
 
-  function toggleTrafficPanel(on) {
+  // ---------- Consola del Navegador (Logs, Warnings y Errores) ----------
+  function updateConsoleBadge() {
+    if (!consoleCountEl) return;
+    consoleCountEl.textContent = String(consoleState.items.length);
+    var hasErr = consoleState.items.some(function (it) { return it.level === "error"; });
+    consoleCountEl.classList.toggle("has-error", hasErr);
+  }
+
+  function matchesConsoleFilter(item) {
+    if (trafficState.deviceFilter !== "all" && item.device_id !== trafficState.deviceFilter) {
+      return false;
+    }
+    var lf = consoleState.levelFilter;
+    if (lf === "error" && item.level !== "error") return false;
+    if (lf === "warn" && item.level !== "warn") return false;
+    if (lf === "info" && item.level !== "info") return false;
+    if (lf === "log" && item.level !== "log" && item.level !== "debug") return false;
+
+    if (trafficState.searchQuery) {
+      var q = trafficState.searchQuery.toLowerCase();
+      var hay = (item.message + " " + item.level + " " + item.device_name + " " + item.source + " " + item.url).toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    return true;
+  }
+
+  function getSelectedConsoleItem() {
+    for (var i = 0; i < consoleState.items.length; i++) {
+      if (consoleState.items[i].id === consoleState.selectedId) return consoleState.items[i];
+    }
+    return null;
+  }
+
+  function formatConsoleDetailText(item) {
+    if (!item) return "";
+    var lines = [
+      "[" + item.time + "] [" + item.level.toUpperCase() + "] (" + item.device_name + ")",
+      "URL: " + (item.url || "—")
+    ];
+    if (item.source) lines.push("Source: " + item.source);
+    lines.push("", item.message || "");
+    if (item.stack) {
+      lines.push("", "--- Stack Trace ---", item.stack);
+    }
+    return lines.join("\n");
+  }
+
+  function renderConsoleDetail() {
+    if (!consoleRawCode) return;
+    var selected = getSelectedConsoleItem();
+    if (!selected) {
+      consoleRawCode.textContent = t("consoleSelectHint");
+      return;
+    }
+    consoleRawCode.textContent = formatConsoleDetailText(selected);
+  }
+
+  function renderConsoleTable(scrollToBottom) {
+    if (!consoleTbody) return;
+    var filtered = consoleState.items.filter(matchesConsoleFilter);
+    consoleTbody.innerHTML = "";
+    if (consoleEmpty) consoleEmpty.hidden = filtered.length > 0;
+
+    filtered.forEach(function (item, idx) {
+      var tr = document.createElement("tr");
+      if (item.id === consoleState.selectedId) tr.className = "is-selected";
+
+      var tdId = document.createElement("td");
+      tdId.className = "col-id";
+      tdId.textContent = "#" + item.id;
+
+      var tdLevel = document.createElement("td");
+      tdLevel.className = "col-level";
+      var lBadge = document.createElement("span");
+      lBadge.className = "level-badge level-" + item.level;
+      lBadge.textContent = item.level.toUpperCase();
+      tdLevel.appendChild(lBadge);
+
+      var tdDevice = document.createElement("td");
+      tdDevice.className = "col-device";
+      tdDevice.textContent = item.device_name;
+      tdDevice.title = item.device_name;
+
+      var tdMsg = document.createElement("td");
+      tdMsg.className = "col-msg";
+      tdMsg.textContent = (item.message || "").split("\n")[0];
+      tdMsg.title = item.message || "";
+
+      var tdSrc = document.createElement("td");
+      tdSrc.className = "col-source";
+      tdSrc.textContent = item.source || item.url || "—";
+      tdSrc.title = item.source || item.url || "";
+
+      var tdTime = document.createElement("td");
+      tdTime.className = "col-time";
+      tdTime.textContent = item.time || "";
+
+      tr.appendChild(tdId);
+      tr.appendChild(tdLevel);
+      tr.appendChild(tdDevice);
+      tr.appendChild(tdMsg);
+      tr.appendChild(tdSrc);
+      tr.appendChild(tdTime);
+
+      tr.addEventListener("click", function () {
+        consoleState.selectedId = item.id;
+        consoleState.userPinned = idx < filtered.length - 1;
+        renderConsoleTable(false);
+        renderConsoleDetail();
+      });
+
+      consoleTbody.appendChild(tr);
+    });
+
+    if (scrollToBottom) {
+      var wrap = consoleTbody.closest(".traffic-table-wrap");
+      if (wrap) {
+        wrap.scrollTop = wrap.scrollHeight;
+      }
+    }
+  }
+
+  var isFetchingConsole = false;
+  function fetchConsole() {
+    if (trafficState.paused || isFetchingConsole) return;
+    isFetchingConsole = true;
+    fetch("/api/console?since=" + consoleState.lastSeq, { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !Array.isArray(data.items) || !data.items.length) return;
+        data.items.forEach(function (item) {
+          consoleState.items.push(item);
+          if (item.id > consoleState.lastSeq) consoleState.lastSeq = item.id;
+        });
+        if (consoleState.items.length > 500) {
+          consoleState.items = consoleState.items.slice(consoleState.items.length - 500);
+        }
+        updateConsoleBadge();
+        if ((!consoleState.selectedId || !consoleState.userPinned) && consoleState.items.length) {
+          consoleState.selectedId = consoleState.items[consoleState.items.length - 1].id;
+        }
+        if (trafficState.open && trafficState.panelMode === "console") {
+          renderConsoleTable(true);
+          renderConsoleDetail();
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        isFetchingConsole = false;
+      });
+  }
+
+  function setPanelMode(mode) {
+    trafficState.panelMode = mode === "console" ? "console" : "traffic";
+    var isConsole = trafficState.panelMode === "console";
+
+    if (panelModeTraffic) panelModeTraffic.classList.toggle("is-active", !isConsole);
+    if (panelModeConsole) panelModeConsole.classList.toggle("is-active", isConsole);
+    if (trafficMethodPills) trafficMethodPills.hidden = isConsole;
+    if (consoleLevelPills) consoleLevelPills.hidden = !isConsole;
+    if (trafficSplitView) trafficSplitView.hidden = isConsole;
+    if (consoleSplitView) consoleSplitView.hidden = !isConsole;
+
+    if (trafficBtn) {
+      var tActive = trafficState.open && !isConsole;
+      trafficBtn.setAttribute("aria-pressed", tActive ? "true" : "false");
+      trafficBtn.classList.toggle("is-active", tActive);
+    }
+    if (consoleBtn) {
+      var cActive = trafficState.open && isConsole;
+      consoleBtn.setAttribute("aria-pressed", cActive ? "true" : "false");
+      consoleBtn.classList.toggle("is-active", cActive);
+    }
+
+    if (trafficState.open) {
+      if (isConsole) {
+        fetchConsole();
+        renderConsoleTable(true);
+        renderConsoleDetail();
+      } else {
+        fetchTraffic();
+        renderTrafficTable(true);
+        renderTrafficDetail();
+      }
+    }
+  }
+
+  function toggleTrafficPanel(on, mode) {
+    if (mode && trafficState.open && trafficState.panelMode !== mode && on === undefined) {
+      setPanelMode(mode);
+      return;
+    }
     if (on === undefined) on = !trafficState.open;
     trafficState.open = !!on;
+    if (mode) trafficState.panelMode = mode;
     if (trafficPanel) trafficPanel.hidden = !trafficState.open;
-    if (trafficBtn) {
-      trafficBtn.setAttribute("aria-pressed", trafficState.open ? "true" : "false");
-      trafficBtn.classList.toggle("is-active", trafficState.open);
-    }
-    if (trafficState.open) {
-      fetchTraffic();
-      renderTrafficTable(true);
-      renderTrafficDetail();
-    }
+    setPanelMode(trafficState.panelMode);
     setTimeout(layout, 50);
   }
 
@@ -1311,7 +1538,16 @@
   populateTrafficDeviceSelect();
 
   if (trafficBtn) {
-    trafficBtn.addEventListener("click", function () { toggleTrafficPanel(); });
+    trafficBtn.addEventListener("click", function () { toggleTrafficPanel(undefined, "traffic"); });
+  }
+  if (consoleBtn) {
+    consoleBtn.addEventListener("click", function () { toggleTrafficPanel(undefined, "console"); });
+  }
+  if (panelModeTraffic) {
+    panelModeTraffic.addEventListener("click", function () { setPanelMode("traffic"); });
+  }
+  if (panelModeConsole) {
+    panelModeConsole.addEventListener("click", function () { setPanelMode("console"); });
   }
   if (trafficCloseBtn) {
     trafficCloseBtn.addEventListener("click", function () { toggleTrafficPanel(false); });
@@ -1322,24 +1558,38 @@
       trafficPauseBtn.classList.toggle("is-paused", trafficState.paused);
       trafficPauseBtn.textContent = trafficState.paused ? t("trafficResume") : t("trafficPause");
       if (trafficDot) trafficDot.classList.toggle("is-paused", trafficState.paused);
-      if (!trafficState.paused) fetchTraffic();
+      if (!trafficState.paused) {
+        fetchTraffic();
+        fetchConsole();
+      }
     });
   }
   if (trafficClearBtn) {
     trafficClearBtn.addEventListener("click", function () {
-      fetch("/api/traffic/clear", { method: "POST", credentials: "same-origin" }).catch(function () {});
-      trafficState.items = [];
-      trafficState.selectedId = null;
-      if (trafficCountEl) trafficCountEl.textContent = "0";
-      renderTrafficTable();
-      renderTrafficDetail();
-      postCrossTab({ type: "bc:traffic_clear" });
+      if (trafficState.panelMode === "console") {
+        fetch("/api/console/clear", { method: "POST", credentials: "same-origin" }).catch(function () {});
+        consoleState.items = [];
+        consoleState.selectedId = null;
+        updateConsoleBadge();
+        renderConsoleTable();
+        renderConsoleDetail();
+        postCrossTab({ type: "bc:console_clear" });
+      } else {
+        fetch("/api/traffic/clear", { method: "POST", credentials: "same-origin" }).catch(function () {});
+        trafficState.items = [];
+        trafficState.selectedId = null;
+        if (trafficCountEl) trafficCountEl.textContent = "0";
+        renderTrafficTable();
+        renderTrafficDetail();
+        postCrossTab({ type: "bc:traffic_clear" });
+      }
     });
   }
   function openTrafficStandaloneWindow() {
+    var activeMode = trafficState.panelMode || "traffic";
     toggleTrafficPanel(false);
     window.open(
-      location.origin + "/?mode=traffic",
+      location.origin + "/?mode=traffic&tab=" + encodeURIComponent(activeMode),
       "rv_traffic_window",
       "width=1140,height=680,resizable=yes,scrollbars=yes"
     );
@@ -1354,12 +1604,14 @@
     trafficSearch.addEventListener("input", function () {
       trafficState.searchQuery = trafficSearch.value.trim();
       renderTrafficTable();
+      renderConsoleTable();
     });
   }
   if (trafficDeviceFilter) {
     trafficDeviceFilter.addEventListener("change", function () {
       trafficState.deviceFilter = trafficDeviceFilter.value;
       renderTrafficTable();
+      renderConsoleTable();
     });
   }
   if (trafficMethodPills) {
@@ -1371,6 +1623,17 @@
         p.classList.toggle("is-active", p === btn);
       });
       renderTrafficTable();
+    });
+  }
+  if (consoleLevelPills) {
+    consoleLevelPills.addEventListener("click", function (ev) {
+      var btn = ev.target.closest(".traffic-pill");
+      if (!btn) return;
+      consoleState.levelFilter = btn.dataset.level || "all";
+      Array.prototype.slice.call(consoleLevelPills.querySelectorAll(".traffic-pill")).forEach(function (p) {
+        p.classList.toggle("is-active", p === btn);
+      });
+      renderConsoleTable();
     });
   }
   trafficTabs.forEach(function (tabBtn) {
@@ -1398,8 +1661,17 @@
       if (item) copyText(buildCurl(item), t("copiedCurl"));
     });
   }
+  if (consoleCopyBtn) {
+    consoleCopyBtn.addEventListener("click", function () {
+      var item = getSelectedConsoleItem();
+      if (item) copyText(formatConsoleDetailText(item), t("copiedConsole"));
+    });
+  }
 
-  setInterval(fetchTraffic, 800);
+  setInterval(function () {
+    fetchTraffic();
+    fetchConsole();
+  }, 800);
 
   // ---------- Menú Agregar dispositivo ----------
   function buildMenu() {
@@ -1540,16 +1812,18 @@
   I18N.applyStatic();
   syncLangSwitch();
 
-  // También se puede abrir con ?url=ejemplo.com&devices=iphone-se,ipad-mini o ?mode=traffic
+  // También se puede abrir con ?url=ejemplo.com&devices=iphone-se,ipad-mini o ?mode=traffic&tab=console
   var params = new URLSearchParams(location.search);
   var paramMode = params.get("mode");
+  var paramTab = params.get("tab");
   var paramDevices = params.get("devices");
   var paramUrl = params.get("url");
 
   if (paramMode === "traffic") {
     document.body.classList.add("is-traffic-standalone");
-    document.title = t("trafficTitle") + " — Responsive Viewer";
-    toggleTrafficPanel(true);
+    var initialTab = paramTab === "console" ? "console" : "traffic";
+    document.title = (initialTab === "console" ? t("console") : t("trafficTitle")) + " — Responsive Viewer";
+    toggleTrafficPanel(true, initialTab);
     return;
   }
 

@@ -200,8 +200,18 @@
         <span class="btn-traffic-text" data-i18n="traffic">Peticiones</span>
         <span class="traffic-badge" id="traffic-count">0</span>
       </button>
+      <button type="button" class="btn btn-traffic btn-console" id="console-btn"
+              title="Ver logs, advertencias y errores de consola de todos los dispositivos"
+              data-i18n-title="consoleHint" aria-pressed="false">
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="m5 7 4 3-4 3"/>
+          <path d="M11 13h4"/>
+        </svg>
+        <span class="btn-traffic-text" data-i18n="console">Consola</span>
+        <span class="traffic-badge" id="console-count">0</span>
+      </button>
       <button type="button" class="btn btn-traffic-detach" id="traffic-ruler-popout"
-              title="Sacar el tráfico HTTP en una ventana independiente para otro monitor"
+              title="Sacar el tráfico HTTP y Consola en una ventana independiente para otro monitor"
               data-i18n-title="trafficPopoutHint" aria-label="Ventana independiente">
         <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
           <path d="M11 4h5v5"/>
@@ -233,7 +243,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=9"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=9"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=10"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=10"></script>
 </body>
 </html>

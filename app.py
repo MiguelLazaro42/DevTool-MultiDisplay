@@ -47,6 +47,11 @@ _traffic_log = collections.deque(maxlen=400)
 _traffic_seq = 0
 _traffic_lock = threading.Lock()
 
+# Historial de eventos de Consola del navegador (log, warn, error, exceptions).
+_console_log = collections.deque(maxlen=400)
+_console_seq = 0
+_console_lock = threading.Lock()
+
 
 def _format_body_preview(raw_bytes, content_type, max_chars=12000):
     if not raw_bytes:
@@ -345,6 +350,41 @@ def api_traffic():
 def api_traffic_clear():
     with _traffic_lock:
         _traffic_log.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/console", methods=["GET", "POST"])
+def api_console():
+    global _console_seq
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        device = DEVICES_BY_ID.get(payload.get("device", ""), {"id": payload.get("device", "unknown"), "name": payload.get("device", "Unknown")})
+        with _console_lock:
+            _console_seq += 1
+            entry = {
+                "id": _console_seq,
+                "time": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "device_id": device["id"],
+                "device_name": device["name"],
+                "level": (payload.get("level") or "log").lower(),
+                "message": (payload.get("message") or "")[:4000],
+                "detail": (payload.get("detail") or "")[:12000],
+                "source": (payload.get("source") or "")[:500],
+                "url": (payload.get("url") or "")[:1000],
+            }
+            _console_log.append(entry)
+        return jsonify({"ok": True, "item": entry})
+
+    since = request.args.get("since", 0, type=int)
+    with _console_lock:
+        items = [e for e in _console_log if e["id"] > since]
+    return jsonify({"items": items})
+
+
+@app.route("/api/console/clear", methods=["POST"])
+def api_console_clear():
+    with _console_lock:
+        _console_log.clear()
     return jsonify({"ok": True})
 
 

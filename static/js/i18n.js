@@ -79,7 +79,13 @@
       popoutDevice: "Move {name} to another window/monitor",
       popoutGroup: "New window ↗",
       trafficPopout: "Detach window ↗",
-      trafficPopoutHint: "Open HTTP Traffic in an independent movable window"
+      trafficPopoutHint: "Open HTTP Traffic & Console in an independent movable window",
+      console: "Console",
+      consoleHint: "Inspect browser console logs, warnings and errors from all screens",
+      consoleEmpty: "No console messages or errors captured yet.",
+      consoleSelectHint: "Select any log or error from the list to inspect its full details and stack trace.",
+      consoleCopy: "Copy Log / Error",
+      copiedConsole: "Console message copied!"
     },
     es: {
       screens: "Pantallas",
@@ -155,7 +161,13 @@
       popoutDevice: "Enviar {name} a otra ventana/monitor",
       popoutGroup: "Otra ventana ↗",
       trafficPopout: "Ventana independiente ↗",
-      trafficPopoutHint: "Sacar el tráfico HTTP en una ventana independiente para otro monitor"
+      trafficPopoutHint: "Sacar el tráfico HTTP y Consola en una ventana independiente para otro monitor",
+      console: "Consola",
+      consoleHint: "Ver logs, advertencias y errores de consola de todos los dispositivos",
+      consoleEmpty: "Aún no hay eventos ni errores de consola capturados.",
+      consoleSelectHint: "Selecciona un evento de consola para ver su detalle completo o stack trace.",
+      consoleCopy: "Copiar Log / Error",
+      copiedConsole: "¡Evento de consola copiado!"
     }
   };
 

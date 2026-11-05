@@ -136,6 +136,96 @@
   window.addEventListener("hashchange", notifyNavigated);
   window.addEventListener("popstate", notifyNavigated);
 
+  // ---------- Captura de Consola del Navegador y Errores ----------
+  function formatConsoleArg(a, detailed) {
+    if (a === undefined) return "undefined";
+    if (a === null) return "null";
+    if (typeof a === "string") return a;
+    if (typeof a === "number" || typeof a === "boolean") return String(a);
+    if (a instanceof Error) {
+      return detailed ? (a.stack || (a.name + ": " + a.message)) : (a.name + ": " + a.message);
+    }
+    if (a && a.nodeType === 1 && a.outerHTML) {
+      return detailed ? a.outerHTML.slice(0, 600) : ("<" + a.tagName.toLowerCase() + ">");
+    }
+    try {
+      return JSON.stringify(a, null, detailed ? 2 : 0);
+    } catch (_e) {
+      return String(a);
+    }
+  }
+
+  function emitConsole(level, args, sourceStr) {
+    try {
+      var summary = args.map(function (a) { return formatConsoleArg(a, false); }).join(" ");
+      var detail = args.map(function (a) { return formatConsoleArg(a, true); }).join("\n\n");
+      parent.postMessage({
+        type: "rv:console_event",
+        frame: F,
+        device: D,
+        level: level,
+        message: summary.slice(0, 1200),
+        detail: detail.slice(0, 10000),
+        source: sourceStr || "",
+        url: getCurrentPageUrl()
+      }, ORIGIN);
+    } catch (_e) {}
+  }
+
+  ["log", "info", "warn", "error", "debug"].forEach(function (lvl) {
+    if (!window.console || typeof window.console[lvl] !== "function") return;
+    var orig = window.console[lvl];
+    window.console[lvl] = function () {
+      var args = Array.prototype.slice.call(arguments);
+      emitConsole(lvl === "debug" ? "log" : lvl, args, "console." + lvl);
+      return orig.apply(window.console, arguments);
+    };
+  });
+
+  window.addEventListener("error", function (e) {
+    if (e.target && e.target !== window && e.target.tagName) {
+      var tag = e.target.tagName.toLowerCase();
+      var resUrl = e.target.src || e.target.href || "";
+      if (resUrl) {
+        emitConsole("error", ["Error al cargar recurso <" + tag + ">: " + resUrl], "<" + tag + ">");
+      }
+      return;
+    }
+    var msg = e.message || "Uncaught Error";
+    var loc = (e.filename ? e.filename.split("/").pop() : "script") + (e.lineno ? (":" + e.lineno + (e.colno ? ":" + e.colno : "")) : "");
+    var stack = (e.error && e.error.stack) ? e.error.stack : (msg + "\n  at " + (e.filename || "") + ":" + (e.lineno || 0));
+    try {
+      parent.postMessage({
+        type: "rv:console_event",
+        frame: F,
+        device: D,
+        level: "error",
+        message: msg,
+        detail: stack,
+        source: loc,
+        url: getCurrentPageUrl()
+      }, ORIGIN);
+    } catch (_e) {}
+  }, true);
+
+  window.addEventListener("unhandledrejection", function (e) {
+    var reason = e.reason;
+    var msg = "Unhandled Promise Rejection: " + (reason && reason.message ? reason.message : String(reason));
+    var detail = (reason && reason.stack) ? reason.stack : formatConsoleArg(reason, true);
+    try {
+      parent.postMessage({
+        type: "rv:console_event",
+        frame: F,
+        device: D,
+        level: "error",
+        message: msg,
+        detail: detail,
+        source: "Promise",
+        url: getCurrentPageUrl()
+      }, ORIGIN);
+    } catch (_e) {}
+  });
+
   // ---------- Inspector de Elementos ----------
   var inspectorActive = false;
   var overlayEl = null;
