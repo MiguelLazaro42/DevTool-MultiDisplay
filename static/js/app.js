@@ -246,10 +246,98 @@
   // opción que permite el zoom más grande. Más pantallas = menos zoom.
   // Con zoom manual se conserva ese acomodo y solo cambia la escala;
   // si no cabe, el tapete se puede recorrer con scroll.
-  function minCssH(d) {
-    if (d.kind === "phone") return Math.round(d.width * 1.25);
-    if (d.kind === "tablet") return Math.round(d.width * 0.9);
-    return Math.round(d.width * 0.5);
+  // ---------- Acomodo y zoom por tipo de dispositivo ----------
+  // 1. Dentro de cada tipo (phone, tablet, desktop), cada dispositivo se ajusta
+  //    en relación al dispositivo más grande de su mismo tipo para que ningún
+  //    teléfono pequeño (p. ej. iPhone SE) o laptop se encoja innecesariamente.
+  // 2. Entre tipos distintos, las tablets y los teléfonos se escalan en relación
+  //    al dispositivo de mayor pantalla activo (manteniendo alturas visuales
+  //    armónicas: Desktop 100%, Tablet 95%, Teléfono 88%) sin deformar jamás
+  //    el aspect-ratio ni el viewport CSS real de ningún iframe.
+  function computeRelativeScales(devices) {
+    var byKind = { phone: [], tablet: [], desktop: [] };
+    devices.forEach(function (d) {
+      if (byKind[d.kind]) byKind[d.kind].push(d);
+    });
+
+    var maxByKind = {};
+    ["phone", "tablet", "desktop"].forEach(function (k) {
+      var list = byKind[k];
+      if (!list.length) return;
+      maxByKind[k] = {
+        w: Math.max.apply(null, list.map(function (d) { return d.width; })),
+        h: Math.max.apply(null, list.map(function (d) { return d.height; }))
+      };
+    });
+
+    // Altura visual base de referencia según la categoría de mayor pantalla activa
+    var groupScale = { phone: 1, tablet: 1, desktop: 1 };
+    if (maxByKind.desktop) {
+      // Si hay desktop/laptop activo, usamos una altura base de referencia de 780px
+      // para que una pantalla de 1920x1080 no reduzca a los teléfonos ni a las tablets.
+      var refDesktopH = 780;
+      groupScale.desktop = refDesktopH / maxByKind.desktop.h;
+      if (maxByKind.tablet) {
+        groupScale.tablet = (refDesktopH * 0.95) / maxByKind.tablet.h;
+      }
+      if (maxByKind.phone) {
+        groupScale.phone = (refDesktopH * 0.88) / maxByKind.phone.h;
+      }
+    } else if (maxByKind.tablet) {
+      // Si el dispositivo más grande es una tablet, las tablets mandan (100%)
+      // y los teléfonos se ajustan al 90% de la altura de la tablet más grande.
+      var refTabletH = maxByKind.tablet.h;
+      groupScale.tablet = 1;
+      if (maxByKind.phone) {
+        groupScale.phone = (refTabletH * 0.90) / maxByKind.phone.h;
+      }
+    } else {
+      // Solo hay teléfonos: todos se ajustan en relación al teléfono más grande.
+      groupScale.phone = 1;
+    }
+
+    var scales = {};
+    devices.forEach(function (d) {
+      var m = maxByKind[d.kind];
+      // Escala relativa al dispositivo más grande de su mismo tipo (sin superar su ancho ni su alto)
+      var withinKind = m ? Math.min(m.w / d.width, m.h / d.height) : 1;
+      scales[d.id] = withinKind * (groupScale[d.kind] || 1);
+    });
+    return scales;
+  }
+
+  // Reparte los dispositivos en `r` filas equilibrando el ancho visual de cada fila
+  // para evitar que una fila quede sobrecargada con los dispositivos más anchos.
+  function partitionRows(devices, r, vWidthFn) {
+    var n = devices.length;
+    if (r <= 1) return [devices.slice()];
+    if (r >= n) return devices.map(function (d) { return [d]; });
+
+    var memo = {};
+    function solve(start, rowsLeft) {
+      var key = start + ":" + rowsLeft;
+      if (memo[key]) return memo[key];
+      if (rowsLeft === 1) {
+        var lastRow = devices.slice(start);
+        var w = lastRow.reduce(function (a, d) { return a + vWidthFn(d); }, 0);
+        return (memo[key] = { maxW: w, rows: [lastRow] });
+      }
+      var bestPart = null;
+      var curW = 0;
+      for (var i = start; i <= n - rowsLeft; i++) {
+        curW += vWidthFn(devices[i]);
+        var rest = solve(i + 1, rowsLeft - 1);
+        var worst = Math.max(curW, rest.maxW);
+        if (!bestPart || worst < bestPart.maxW) {
+          bestPart = {
+            maxW: worst,
+            rows: [devices.slice(start, i + 1)].concat(rest.rows)
+          };
+        }
+      }
+      return (memo[key] = bestPart);
+    }
+    return solve(0, r).rows;
   }
 
   function layout() {
@@ -265,68 +353,65 @@
     }
 
     var devices = state.active.map(function (id) { return BY_ID[id]; });
+    var relScales = computeRelativeScales(devices);
+    function vW(d) { return d.width * relScales[d.id]; }
+    function vH(d) { return d.height * relScales[d.id]; }
+
     var best = null;
     var isFill = state.zoomMode === "fill";
 
     for (var r = 1; r <= n; r++) {
-      var per = Math.ceil(n / r);
-      var rows = [];
-      for (var i = 0; i < n; i += per) rows.push(devices.slice(i, i + per));
+      var rows = partitionRows(devices, r, vW);
       if (rows.length !== r) continue;
 
-      if (isFill) {
-        var sFill = 1.5;
-        var freeRowH = Math.max(220, (H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y) / r);
-        rows.forEach(function (row) {
-          var sumW = row.reduce(function (a, d) { return a + d.width; }, 0);
-          var freeW = W - row.length * BEZEL - (row.length - 1) * GAP_X;
-          sFill = Math.min(sFill, freeW / sumW);
-          var maxMinCssH = Math.max.apply(null, row.map(minCssH));
-          sFill = Math.min(sFill, freeRowH / maxMinCssH);
-        });
-        if (!best || sFill > best.s) best = { s: sFill, rows: rows, freeRowH: freeRowH };
-      } else {
-        var sFit = 2.0; // Permite aprovechar monitores amplios hasta 200%
-        var sumRowH = 0;
-        rows.forEach(function (row) {
-          var sumW = row.reduce(function (a, d) { return a + d.width; }, 0);
-          var free = W - row.length * BEZEL - (row.length - 1) * GAP_X;
-          sFit = Math.min(sFit, free / sumW);
-          sumRowH += Math.max.apply(null, row.map(function (d) { return d.height; }));
-        });
-        var freeH = H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y;
-        sFit = Math.min(sFit, freeH / sumRowH);
-        if (!best || sFit > best.s) best = { s: sFit, rows: rows };
+      var sCandidate = 2.0;
+      var sumRowH = 0;
+      rows.forEach(function (row) {
+        var sumW = row.reduce(function (a, d) { return a + vW(d); }, 0);
+        var freeW = W - row.length * BEZEL - (row.length - 1) * GAP_X;
+        sCandidate = Math.min(sCandidate, freeW / sumW);
+        sumRowH += Math.max.apply(null, row.map(vH));
+      });
+      var freeH = H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y;
+      sCandidate = Math.min(sCandidate, freeH / sumRowH);
+
+      if (!best || sCandidate > best.s) {
+        best = { s: sCandidate, rows: rows, freeH: freeH, sumRowH: sumRowH };
       }
     }
 
     var s;
-    if (state.zoomMode === "fit") {
+    if (state.zoomMode === "fit" || state.zoomMode === "fill") {
       s = Math.max(ZOOM_MIN / 2, Math.min(2.0, best.s));
-    } else if (state.zoomMode === "fill") {
-      s = Math.max(ZOOM_MIN / 2, Math.min(1.5, best.s));
     } else {
       s = state.zoomMode;
     }
     setZoom(s);
 
-    // En modo Fill cada dispositivo conserva su ancho CSS exacto (para media queries reales)
-    // pero adapta su altura de viewport para aprovechar el 100% del alto disponible sin cortarse.
-    var effHeights = {};
-    devices.forEach(function (d) {
-      if (isFill && best.freeRowH) {
-        effHeights[d.id] = Math.max(minCssH(d), Math.round(best.freeRowH / s));
-      } else {
-        effHeights[d.id] = d.height;
-      }
+    // En modo Fill, si hay varias filas y una fila es más angosta que el ancho disponible,
+    // le damos un impulso extra de escala (respetando la altura libre) para aprovechar la ventana.
+    var extraH = isFill ? Math.max(0, best.freeH - best.sumRowH * s) : 0;
+    var extraHPerRow = best.rows.length > 0 ? (extraH / best.rows.length) : 0;
+
+    var rowScales = best.rows.map(function (row) {
+      if (!isFill) return s;
+      var sumW = row.reduce(function (a, d) { return a + vW(d); }, 0);
+      var maxH = Math.max.apply(null, row.map(vH));
+      var freeW = W - row.length * BEZEL - (row.length - 1) * GAP_X;
+      var maxRowHAllowed = maxH * s + extraHPerRow;
+      var sByW = sumW > 0 ? (freeW / sumW) : s;
+      var sByH = maxH > 0 ? (maxRowHAllowed / maxH) : s;
+      return Math.max(s, Math.min(s * 1.28, sByW, sByH));
     });
 
     // Posiciones: filas centradas horizontal y verticalmente.
-    var rowWidths = best.rows.map(function (row) {
-      return row.reduce(function (a, d) { return a + d.width * s + BEZEL; }, 0) + (row.length - 1) * GAP_X;
+    var rowWidths = best.rows.map(function (row, ri) {
+      var rs = rowScales[ri];
+      return row.reduce(function (a, d) { return a + vW(d) * rs + BEZEL; }, 0) + (row.length - 1) * GAP_X;
     });
-    var rowHeights = best.rows.map(function (row) {
-      return Math.max.apply(null, row.map(function (d) { return effHeights[d.id] * s; })) + BEZEL + CAPTION;
+    var rowHeights = best.rows.map(function (row, ri) {
+      var rs = rowScales[ri];
+      return Math.max.apply(null, row.map(function (d) { return vH(d) * rs; })) + BEZEL + CAPTION;
     });
     var totalW = Math.max.apply(null, rowWidths);
     var totalH = rowHeights.reduce(function (a, b) { return a + b; }, 0) + (best.rows.length - 1) * GAP_Y;
@@ -342,29 +427,37 @@
 
     best.rows.forEach(function (row, ri) {
       var rowW = rowWidths[ri];
+      var rs = rowScales[ri];
+      var rowContentH = rowHeights[ri] - BEZEL - CAPTION;
       var x = PAD_X + (areaW - rowW) / 2;
       row.forEach(function (d) {
-        place(d, x, y, s, effHeights[d.id]);
-        x += d.width * s + BEZEL + GAP_X;
+        var devScale = rs * relScales[d.id];
+        var devH = d.height * devScale;
+        // Centrar verticalmente cada dispositivo dentro de la altura de su fila
+        var offsetY = y + Math.max(0, (rowContentH - devH) / 2);
+        place(d, x, offsetY, devScale);
+        x += d.width * devScale + BEZEL + GAP_X;
       });
       y += rowHeights[ri] + GAP_Y;
     });
   }
 
-  function place(d, x, y, s, customH) {
+  function place(d, x, y, devScale) {
     var e = els[d.id];
-    var effH = customH || d.height;
-    var w = d.width * s, h = effH * s;
+    e.scale = devScale;
+    var w = d.width * devScale, h = d.height * devScale;
     e.screen.style.width = w + "px";
     e.screen.style.height = h + "px";
-    e.iframe.height = effH;
-    e.iframe.style.height = effH + "px";
+    e.iframe.width = d.width;
+    e.iframe.height = d.height;
+    e.iframe.style.width = d.width + "px";
+    e.iframe.style.height = d.height + "px";
     if (e.sizeEl) {
-      e.sizeEl.textContent = d.width + " × " + effH;
+      e.sizeEl.textContent = d.width + " × " + d.height;
     }
     e.root.style.width = (w + BEZEL) + "px";
-    e.root.style.setProperty("--radius", Math.max(3, RADIUS[d.kind] * s) + "px");
-    e.iframe.style.transform = "scale(" + s + ")";
+    e.root.style.setProperty("--radius", Math.max(3, RADIUS[d.kind] * devScale) + "px");
+    e.iframe.style.transform = "scale(" + devScale + ")";
 
     var t = "translate(" + Math.round(x) + "px," + Math.round(y) + "px)";
     if (!e.root.dataset.placed) {
