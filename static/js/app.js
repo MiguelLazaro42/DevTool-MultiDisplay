@@ -1142,13 +1142,37 @@
       var scrollPayload = {
         type: "rv:do_sync_scroll",
         containerSelector: d.containerSelector || "",
+        structuralSelector: d.structuralSelector || "",
+        isInsideModal: !!d.isInsideModal,
         x: d.x,
         y: d.y,
         dx: d.dx,
-        dy: d.dy
+        dy: d.dy,
+        ratioX: d.ratioX,
+        ratioY: d.ratioY
       };
       broadcastToOtherFrames(d.frame, scrollPayload);
       postCrossTab({ type: "bc:sync_scroll", payload: scrollPayload });
+    } else if (d.type === "rv:sync_drag") {
+      if (!state.sync) return;
+      var dragPayload = {
+        type: "rv:do_sync_drag",
+        phase: d.phase,
+        selector: d.selector || "",
+        structuralSelector: d.structuralSelector || "",
+        isInsideModal: !!d.isInsideModal,
+        rx: d.rx,
+        ry: d.ry,
+        dx: d.dx,
+        dy: d.dy,
+        stepDx: d.stepDx,
+        stepDy: d.stepDy,
+        vw: d.vw,
+        vh: d.vh,
+        modalStyleDelta: d.modalStyleDelta || null
+      };
+      broadcastToOtherFrames(d.frame, dragPayload);
+      postCrossTab({ type: "bc:sync_drag", payload: dragPayload });
     } else if (d.type === "rv:sync_click") {
       if (!state.sync) return;
       var clickPayload = {
@@ -1160,10 +1184,26 @@
         tag: d.tag,
         text: d.text,
         href: d.href,
-        absHref: d.absHref
+        absHref: d.absHref,
+        isModalClose: !!d.isModalClose,
+        isBackdropClick: !!d.isBackdropClick,
+        isInsideModal: !!d.isInsideModal,
+        rx: d.rx,
+        ry: d.ry
       };
       broadcastToOtherFrames(d.frame, clickPayload);
       postCrossTab({ type: "bc:sync_click", payload: clickPayload });
+    } else if (d.type === "rv:sync_key") {
+      if (!state.sync) return;
+      var keyPayload = {
+        type: "rv:do_sync_key",
+        key: d.key,
+        code: d.code,
+        keyCode: d.keyCode,
+        selector: d.selector
+      };
+      broadcastToOtherFrames(d.frame, keyPayload);
+      postCrossTab({ type: "bc:sync_key", payload: keyPayload });
     } else if (d.type === "rv:sync_input") {
       if (!state.sync) return;
       var inputPayload = {
@@ -1287,7 +1327,11 @@
       } else if (msg.type === "bc:sync_scroll") {
         var sp = msg.payload || { type: "rv:do_sync_scroll", dx: msg.dx, dy: msg.dy, force: true };
         broadcastToOtherFrames(null, sp);
+      } else if (msg.type === "bc:sync_drag" && msg.payload) {
+        broadcastToOtherFrames(null, msg.payload);
       } else if (msg.type === "bc:sync_click" && msg.payload) {
+        broadcastToOtherFrames(null, msg.payload);
+      } else if (msg.type === "bc:sync_key" && msg.payload) {
         broadcastToOtherFrames(null, msg.payload);
       } else if (msg.type === "bc:sync_input" && msg.payload) {
         broadcastToOtherFrames(null, msg.payload);

@@ -718,7 +718,280 @@
     };
   }
 
-  // 1. Emitir scroll sincronizado (ventana y contenedores internos) y registrar en el Rastreador de Usuario
+  // ---------- Helpers de Modales / Overlays para Sincronización Multi-Vista ----------
+  var MODAL_ROOT_SELECTOR = [
+    "dialog[open]",
+    "[aria-modal='true']",
+    "[role='dialog']",
+    "[role='alertdialog']",
+    ".modal.show",
+    ".modal.in",
+    ".modal.is-active",
+    ".modal.active",
+    ".modal[style*='display: block']",
+    ".modal[style*='display:block']",
+    ".modal[style*='display: flex']",
+    ".modal[style*='display:flex']",
+    ".drawer",
+    ".bottom-sheet",
+    ".popup",
+    "[class*='modal']",
+    "[class*='dialog']",
+    "[class*='drawer']",
+    "[class*='bottom-sheet']",
+    "[class*='sheet']"
+  ].join(", ");
+
+  function getOpenModals() {
+    var list = [];
+    var seen = [];
+    var vw = window.innerWidth || document.documentElement.clientWidth || 1;
+    var vh = window.innerHeight || document.documentElement.clientHeight || 1;
+    try {
+      var nodes = document.querySelectorAll(MODAL_ROOT_SELECTOR);
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (!el || el === overlayEl || (overlayEl && overlayEl.contains(el))) continue;
+        if (!isVisible(el)) continue;
+        var r = el.getBoundingClientRect();
+        if (r.width < 80 || r.height < 60) continue;
+        if (r.bottom <= 0 || r.right <= 0 || r.top >= vh || r.left >= vw) continue;
+        var st = window.getComputedStyle(el);
+        var pos = st.position;
+        var isDialogTag = el.tagName && el.tagName.toLowerCase() === "dialog";
+        var hasAria = el.getAttribute("aria-modal") === "true" || el.getAttribute("role") === "dialog" || el.getAttribute("role") === "alertdialog";
+        if (pos === "fixed" || pos === "absolute" || isDialogTag || hasAria || el.closest("[aria-modal='true'], [role='dialog'], dialog[open], .modal")) {
+          if (seen.indexOf(el) === -1) {
+            seen.push(el);
+            list.push(el);
+          }
+        }
+      }
+    } catch (_e) {}
+
+    // También detectar contenedores position:fixed grandes que actúen como modal/overlay sin clase estándar
+    try {
+      var centerEl = document.elementFromPoint(vw / 2, vh / 2);
+      var curr = centerEl;
+      while (curr && curr !== document.body && curr !== document.documentElement) {
+        if (curr === overlayEl) break;
+        var cst = window.getComputedStyle(curr);
+        if (cst.position === "fixed") {
+          var cr = curr.getBoundingClientRect();
+          var isTopNavbar = cr.top <= 10 && cr.height < 100 && cr.width >= vw * 0.8;
+          if (!isTopNavbar && cr.width >= 140 && cr.height >= 100 && seen.indexOf(curr) === -1) {
+            seen.push(curr);
+            list.push(curr);
+          }
+        }
+        curr = curr.parentElement;
+      }
+    } catch (_e2) {}
+
+    return list;
+  }
+
+  function isElementInsideModal(el) {
+    if (!el || el.nodeType !== 1) return false;
+    var vw = window.innerWidth || document.documentElement.clientWidth || 1;
+    var curr = el;
+    while (curr && curr !== document.body && curr !== document.documentElement) {
+      if (curr === overlayEl) return false;
+      var tag = (curr.tagName || "").toLowerCase();
+      if (tag === "dialog") return true;
+      var role = curr.getAttribute("role");
+      if (role === "dialog" || role === "alertdialog" || curr.getAttribute("aria-modal") === "true") return true;
+      var cls = (typeof curr.className === "string" ? curr.className : "").toLowerCase();
+      if (/\b(modal|dialog|drawer|sheet|bottom-sheet|popup|lightbox|offcanvas)\b/.test(cls)) return true;
+      try {
+        var st = window.getComputedStyle(curr);
+        if (st.position === "fixed") {
+          var r = curr.getBoundingClientRect();
+          var isTopNav = r.top <= 10 && r.height < 96 && r.width >= vw * 0.75;
+          if (!isTopNav && r.height >= 100 && r.width >= 140) return true;
+        }
+      } catch (_e) {}
+      curr = curr.parentElement;
+    }
+    return false;
+  }
+
+  function findEnclosingModalRoot(el) {
+    if (!el || el.nodeType !== 1) return null;
+    var curr = el;
+    var bestFixed = null;
+    while (curr && curr !== document.body && curr !== document.documentElement) {
+      var tag = (curr.tagName || "").toLowerCase();
+      var role = curr.getAttribute("role");
+      var cls = (typeof curr.className === "string" ? curr.className : "").toLowerCase();
+      if (tag === "dialog" || role === "dialog" || role === "alertdialog" || curr.getAttribute("aria-modal") === "true") {
+        return curr;
+      }
+      if (/\b(modal-dialog|modal-content|modal|drawer|bottom-sheet|sheet|popup|offcanvas)\b/.test(cls)) {
+        return curr;
+      }
+      try {
+        var st = window.getComputedStyle(curr);
+        if (st.position === "fixed" && !bestFixed) bestFixed = curr;
+      } catch (_e) {}
+      curr = curr.parentElement;
+    }
+    return bestFixed;
+  }
+
+  function isScrollableElement(el) {
+    if (!el || el.nodeType !== 1) return false;
+    var canV = (el.scrollHeight - el.clientHeight) > 2;
+    var canH = (el.scrollWidth - el.clientWidth) > 2;
+    if (!canV && !canH) return false;
+    try {
+      var st = window.getComputedStyle(el);
+      var oy = st.overflowY;
+      var ox = st.overflowX;
+      var scrollYOk = canV && (oy === "auto" || oy === "scroll" || oy === "overlay" || el.tagName === "DIALOG");
+      var scrollXOk = canH && (ox === "auto" || ox === "scroll" || ox === "overlay");
+      return scrollYOk || scrollXOk;
+    } catch (_e) {
+      return canV || canH;
+    }
+  }
+
+  function findBestScrollableInside(root) {
+    if (!root || root.nodeType !== 1) return null;
+    var best = null;
+    var bestRange = 0;
+    try {
+      var descendants = root.querySelectorAll("*");
+      for (var i = 0; i < descendants.length; i++) {
+        var d = descendants[i];
+        if (!isVisible(d)) continue;
+        if (isScrollableElement(d)) {
+          var range = (d.scrollHeight - d.clientHeight) + (d.scrollWidth - d.clientWidth);
+          if (range > bestRange) {
+            bestRange = range;
+            best = d;
+          }
+        }
+      }
+    } catch (_e) {}
+    if (best) return best;
+    if (isScrollableElement(root)) return root;
+    return null;
+  }
+
+  function findActiveScrollableModalContainer(hintSelector, structuralSelector, isModalScroll) {
+    var selectors = [hintSelector, structuralSelector];
+    for (var s = 0; s < selectors.length; s++) {
+      var sel = selectors[s];
+      if (!sel) continue;
+      try {
+        var el = document.querySelector(sel);
+        if (el && isVisible(el)) {
+          if (isScrollableElement(el)) return el;
+          var childScroll = findBestScrollableInside(el);
+          if (childScroll) return childScroll;
+          var modalRoot = findEnclosingModalRoot(el);
+          if (modalRoot) {
+            var rootScroll = findBestScrollableInside(modalRoot);
+            if (rootScroll) return rootScroll;
+          }
+        }
+      } catch (_e) {}
+    }
+
+    if (isModalScroll) {
+      var modals = getOpenModals();
+      for (var m = modals.length - 1; m >= 0; m--) {
+        var candidate = findBestScrollableInside(modals[m]);
+        if (candidate) return candidate;
+      }
+    }
+
+    // Fallback: si el selector existe aunque aún no tenga overflow mayor
+    for (var f = 0; f < selectors.length; f++) {
+      if (!selectors[f]) continue;
+      try {
+        var raw = document.querySelector(selectors[f]);
+        if (raw) return raw;
+      } catch (_e2) {}
+    }
+    return null;
+  }
+
+  function isModalCloseTrigger(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (!isElementInsideModal(el)) return false;
+    var curr = el;
+    for (var depth = 0; depth < 4 && curr && curr !== document.body; depth++) {
+      var attrDismiss = (curr.getAttribute("data-bs-dismiss") || curr.getAttribute("data-dismiss") || curr.getAttribute("data-close") || "").toLowerCase();
+      if (attrDismiss === "modal" || attrDismiss === "dialog" || attrDismiss === "drawer" || attrDismiss === "offcanvas" || curr.hasAttribute(" data-modal-close")) return true;
+      var aria = (curr.getAttribute("aria-label") || curr.getAttribute("title") || "").toLowerCase();
+      if (aria && /(close|cerrar|dismiss|salir)/.test(aria)) return true;
+      var cls = (typeof curr.className === "string" ? curr.className : "").toLowerCase();
+      if (/\b(btn-close|modal-close|dialog-close|close-btn|close-button|close-modal|close)\b/.test(cls)) return true;
+      var txt = (curr.innerText || curr.textContent || "").trim();
+      if ((txt === "×" || txt === "✕" || txt === "✖" || txt === "X" || txt === "x" || /^(cerrar|close)$/i.test(txt)) && (curr.tagName === "BUTTON" || curr.tagName === "A" || curr.getAttribute("role") === "button" || depth === 0)) {
+        return true;
+      }
+      curr = curr.parentElement;
+    }
+    return false;
+  }
+
+  function isModalBackdropElement(el, clientX, clientY) {
+    if (!el || el.nodeType !== 1) return false;
+    var tag = (el.tagName || "").toLowerCase();
+    var cls = (typeof el.className === "string" ? el.className : "").toLowerCase();
+    if (/\b(modal-backdrop|backdrop|overlay|modal-overlay|dialog-backdrop|drawer-backdrop|offcanvas-backdrop)\b/.test(cls)) {
+      return true;
+    }
+    var vw = window.innerWidth || document.documentElement.clientWidth || 1;
+    var vh = window.innerHeight || document.documentElement.clientHeight || 1;
+    var r = el.getBoundingClientRect();
+    var coversViewport = r.width >= vw * 0.85 && r.height >= vh * 0.85;
+    if (coversViewport && (tag === "dialog" || /\b(modal|drawer|sheet|popup|dialog)\b/.test(cls) || el.getAttribute("role") === "dialog")) {
+      // Verificar que el clic fue sobre el contenedor externo (backdrop) y no dentro del cuadro de contenido si tiene un hijo diálogo
+      var innerDialog = el.querySelector(".modal-dialog, .modal-content, [class*='modal-content'], [class*='dialog-content'], [class*='modal-box']");
+      if (innerDialog && typeof clientX === "number" && typeof clientY === "number") {
+        var ir = innerDialog.getBoundingClientRect();
+        var insideInner = clientX >= ir.left && clientX <= ir.right && clientY >= ir.top && clientY <= ir.bottom;
+        if (!insideInner) return true;
+      } else if (tag === "dialog") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function dispatchSyntheticPointerAndMouse(el, phase, clientX, clientY) {
+    if (!el) return;
+    var pType = phase === "start" ? "pointerdown" : (phase === "move" ? "pointermove" : "pointerup");
+    var mType = phase === "start" ? "mousedown" : (phase === "move" ? "mousemove" : "mouseup");
+    var buttons = phase === "end" ? 0 : 1;
+    var evInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: Math.round(clientX || 0),
+      clientY: Math.round(clientY || 0),
+      screenX: Math.round(clientX || 0),
+      screenY: Math.round(clientY || 0),
+      button: 0,
+      buttons: buttons
+    };
+    try {
+      if (typeof PointerEvent === "function") {
+        el.dispatchEvent(new PointerEvent(pType, Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, evInit)));
+      }
+    } catch (_e) {}
+    try {
+      el.dispatchEvent(new MouseEvent(mType, evInit));
+    } catch (_e2) {}
+  }
+
+  // 1. Emitir scroll sincronizado (ventana y contenedores internos / modales) y registrar en el Rastreador de Usuario
+  var containerScrollMap = typeof WeakMap === "function" ? new WeakMap() : null;
   var scrollTrackState = {
     timer: null,
     startX: lastScrollX,
@@ -737,6 +1010,8 @@
       if (isDocScroll) {
         lastScrollX = x;
         lastScrollY = y;
+      } else if (containerScrollMap && target && target.nodeType === 1) {
+        containerScrollMap.set(target, { x: x, y: y });
       }
       return;
     }
@@ -748,6 +1023,10 @@
       lastScrollY = y;
       if (dx !== 0 || dy !== 0) {
         if (syncActive) {
+          var vwDoc = Math.max(1, document.documentElement.clientWidth || window.innerWidth || 1);
+          var vhDoc = Math.max(1, document.documentElement.clientHeight || window.innerHeight || 1);
+          var maxDocX = Math.max(0, (document.documentElement.scrollWidth || document.body.scrollWidth || vwDoc) - vwDoc);
+          var maxDocY = Math.max(0, (document.documentElement.scrollHeight || document.body.scrollHeight || vhDoc) - vhDoc);
           try {
             parent.postMessage({
               type: "rv:sync_scroll",
@@ -755,19 +1034,34 @@
               x: x,
               y: y,
               dx: dx,
-              dy: dy
+              dy: dy,
+              ratioX: maxDocX > 0 ? (x / maxDocX) : 0,
+              ratioY: maxDocY > 0 ? (y / maxDocY) : 0
             }, ORIGIN);
           } catch (_e) {}
         }
       }
     } else if (target && target.nodeType === 1 && syncActive) {
+      var prevC = (containerScrollMap && containerScrollMap.get(target)) || { x: x, y: y };
+      var cDx = x - prevC.x;
+      var cDy = y - prevC.y;
+      if (containerScrollMap) containerScrollMap.set(target, { x: x, y: y });
+      var maxCX = Math.max(0, (target.scrollWidth || 0) - (target.clientWidth || 0));
+      var maxCY = Math.max(0, (target.scrollHeight || 0) - (target.clientHeight || 0));
+      var inModal = isElementInsideModal(target);
       try {
         parent.postMessage({
           type: "rv:sync_scroll",
           frame: F,
           containerSelector: getSelector(target, false),
+          structuralSelector: getSelector(target, true),
+          isInsideModal: inModal,
           x: x,
-          y: y
+          y: y,
+          dx: cDx,
+          dy: cDy,
+          ratioX: maxCX > 0 ? (x / maxCX) : 0,
+          ratioY: maxCY > 0 ? (y / maxCY) : 0
         }, ORIGIN);
       } catch (_e) {}
     }
@@ -844,16 +1138,122 @@
     }, 320);
   }, true);
 
-  // 1b. Detectar gestos de arrastre / swipe horizontal o vertical
+  // 1b. Detectar y sincronizar en tiempo real gestos de arrastre / movimiento de modales / bottom-sheets / sliders
   var pointerDownState = null;
+  var activeDragReplayTarget = null;
+
+  function captureModalInlineStyle(modalEl) {
+    if (!modalEl || !modalEl.style) return null;
+    return {
+      transform: modalEl.style.transform || "",
+      left: modalEl.style.left || "",
+      top: modalEl.style.top || "",
+      right: modalEl.style.right || "",
+      bottom: modalEl.style.bottom || ""
+    };
+  }
+
+  function hasModalStyleChanged(initial, current) {
+    if (!initial || !current) return false;
+    return initial.transform !== current.transform ||
+      initial.left !== current.left ||
+      initial.top !== current.top ||
+      initial.right !== current.right ||
+      initial.bottom !== current.bottom;
+  }
+
   window.addEventListener("pointerdown", function (e) {
     if (inspectorActive || isReplayingSync || !e.isTrusted) return;
+    var el = (e.target && e.target.nodeType === 1) ? e.target : document.body;
+    if (el === overlayEl || (overlayEl && overlayEl.contains(el))) return;
+    var r = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 1, height: 1 };
+    var inModal = isElementInsideModal(el);
+    var modalRoot = inModal ? findEnclosingModalRoot(el) : null;
     pointerDownState = {
       x: e.clientX,
       y: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
       time: Date.now(),
-      target: e.target
+      lastEmitTs: 0,
+      dragStarted: false,
+      target: el,
+      selector: getSelector(el, false),
+      structuralSelector: getSelector(el, true),
+      isInsideModal: inModal,
+      modalRoot: modalRoot,
+      initialModalStyle: captureModalInlineStyle(modalRoot),
+      rx: Math.max(0, Math.min(1, (e.clientX - r.left) / Math.max(1, r.width))),
+      ry: Math.max(0, Math.min(1, (e.clientY - r.top) / Math.max(1, r.height)))
     };
+  }, true);
+
+  window.addEventListener("pointermove", function (e) {
+    if (!pointerDownState || inspectorActive || isReplayingSync || !e.isTrusted) return;
+    if (e.pointerType === "mouse" && e.buttons === 0) {
+      pointerDownState = null;
+      return;
+    }
+    var st = pointerDownState;
+    var dx = Math.round(e.clientX - st.x);
+    var dy = Math.round(e.clientY - st.y);
+    var stepDx = Math.round(e.clientX - st.lastX);
+    var stepDy = Math.round(e.clientY - st.lastY);
+
+    if (!st.dragStarted) {
+      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+      st.dragStarted = true;
+      if (syncActive) {
+        try {
+          parent.postMessage({
+            type: "rv:sync_drag",
+            frame: F,
+            phase: "start",
+            selector: st.selector,
+            structuralSelector: st.structuralSelector,
+            isInsideModal: st.isInsideModal,
+            rx: st.rx,
+            ry: st.ry,
+            dx: 0,
+            dy: 0,
+            stepDx: 0,
+            stepDy: 0,
+            vw: Math.max(1, window.innerWidth || 1),
+            vh: Math.max(1, window.innerHeight || 1)
+          }, ORIGIN);
+        } catch (_e) {}
+      }
+    }
+
+    var now = Date.now();
+    if (now - st.lastEmitTs < 24) return;
+    st.lastEmitTs = now;
+    st.lastX = e.clientX;
+    st.lastY = e.clientY;
+
+    if (syncActive) {
+      var curModalStyle = captureModalInlineStyle(st.modalRoot);
+      var styleDelta = hasModalStyleChanged(st.initialModalStyle, curModalStyle) ? curModalStyle : null;
+      try {
+        parent.postMessage({
+          type: "rv:sync_drag",
+          frame: F,
+          phase: "move",
+          selector: st.selector,
+          structuralSelector: st.structuralSelector,
+          isInsideModal: st.isInsideModal,
+          rx: st.rx,
+          ry: st.ry,
+          dx: dx,
+          dy: dy,
+          stepDx: stepDx,
+          stepDy: stepDy,
+          vw: Math.max(1, window.innerWidth || 1),
+          vh: Math.max(1, window.innerHeight || 1),
+          modalStyleDelta: styleDelta
+        }, ORIGIN);
+      } catch (_e2) {}
+    }
   }, true);
 
   window.addEventListener("pointerup", function (e) {
@@ -862,6 +1262,31 @@
     pointerDownState = null;
     var dx = Math.round(e.clientX - st.x);
     var dy = Math.round(e.clientY - st.y);
+
+    if (st.dragStarted && syncActive) {
+      var curModalStyle = captureModalInlineStyle(st.modalRoot);
+      var styleDelta = hasModalStyleChanged(st.initialModalStyle, curModalStyle) ? curModalStyle : null;
+      try {
+        parent.postMessage({
+          type: "rv:sync_drag",
+          frame: F,
+          phase: "end",
+          selector: st.selector,
+          structuralSelector: st.structuralSelector,
+          isInsideModal: st.isInsideModal,
+          rx: st.rx,
+          ry: st.ry,
+          dx: dx,
+          dy: dy,
+          stepDx: Math.round(e.clientX - st.lastX),
+          stepDy: Math.round(e.clientY - st.lastY),
+          vw: Math.max(1, window.innerWidth || 1),
+          vh: Math.max(1, window.innerHeight || 1),
+          modalStyleDelta: styleDelta
+        }, ORIGIN);
+      } catch (_e) {}
+    }
+
     var dist = Math.round(Math.sqrt(dx * dx + dy * dy));
     var elapsed = Date.now() - st.time;
     if (dist < 40 || elapsed > 2500) return;
@@ -946,6 +1371,12 @@
 
     if (!syncActive) return;
 
+    var modalClose = isModalCloseTrigger(mainEl);
+    var backdropClick = !modalClose && isModalBackdropElement(target, cx, cy);
+    var inModal = isElementInsideModal(target);
+    var rx = box.width > 0 ? Math.max(0, Math.min(1, (cx - box.x) / box.width)) : 0.5;
+    var ry = box.height > 0 ? Math.max(0, Math.min(1, (cy - box.y) / box.height)) : 0.5;
+
     try {
       parent.postMessage({
         type: "rv:sync_click",
@@ -957,7 +1388,12 @@
         tag: tag,
         text: text,
         href: href,
-        absHref: absHref
+        absHref: absHref,
+        isModalClose: modalClose,
+        isBackdropClick: backdropClick,
+        isInsideModal: inModal,
+        rx: rx,
+        ry: ry
       }, ORIGIN);
     } catch (_e) {}
   }, true);
@@ -1024,7 +1460,7 @@
   window.addEventListener("input", onSyncInput, true);
   window.addEventListener("change", onSyncInput, true);
 
-  // 4. Registrar envío de formularios y teclas clave (Enter / Escape)
+  // 4. Registrar envío de formularios y teclas clave (Enter / Escape / Flechas en modales)
   window.addEventListener("submit", function (e) {
     if (inspectorActive || isReplayingSync || !e.isTrusted) return;
     var form = e.target;
@@ -1052,8 +1488,24 @@
 
   window.addEventListener("keydown", function (e) {
     if (inspectorActive || isReplayingSync || !e.isTrusted) return;
-    if (e.key !== "Enter" && e.key !== "Escape") return;
     var activeEl = document.activeElement || document.body;
+    var activeTag = (activeEl.tagName || "body").toLowerCase();
+    var isTypingField = (activeTag === "input" || activeTag === "textarea" || activeEl.isContentEditable);
+
+    if (syncActive && (e.key === "Escape" || e.key === "Enter" || (!isTypingField && (e.key === "ArrowLeft" || e.key === "ArrowRight")))) {
+      try {
+        parent.postMessage({
+          type: "rv:sync_key",
+          frame: F,
+          key: e.key,
+          code: e.code || "",
+          keyCode: e.keyCode || 0,
+          selector: getSelector(activeEl, false)
+        }, ORIGIN);
+      } catch (_e) {}
+    }
+
+    if (e.key !== "Enter" && e.key !== "Escape") return;
     var box = getElementBox(activeEl);
     var zInfo = getScreenZoneAndCoords((box.x || 0) + (box.width || 0) / 2, (box.y || 0) + (box.height || 0) / 2);
     try {
@@ -1063,7 +1515,7 @@
         device: D,
         action: "keypress",
         selector: getSelector(activeEl, false),
-        tag: (activeEl.tagName || "body").toLowerCase(),
+        tag: activeTag,
         label: "Tecla " + e.key,
         value: e.key,
         section: getSemanticSection(activeEl),
@@ -1094,19 +1546,66 @@
       } catch (_e) {}
     }
     if (d.tag && d.text) {
-      var candidates = document.querySelectorAll(d.tag);
+      var candidates = document.querySelectorAll(d.tag + ", button, a, [role='button']");
       for (var k = 0; k < candidates.length; k++) {
-        var cText = (candidates[k].innerText || "").trim().slice(0, 80);
+        var cText = (candidates[k].innerText || candidates[k].getAttribute("aria-label") || candidates[k].getAttribute("title") || "").replace(/\s+/g, " ").trim().slice(0, 80);
         if (cText === d.text && isVisible(candidates[k])) return candidates[k];
       }
     }
-    // Último intento aunque no sea visible (p. ej. enlace en menú móvil cerrado)
-    for (var m = 0; m < selectors.length; m++) {
-      if (!selectors[m]) continue;
+
+    // Fallback para botón de cierre de modal entre plantillas distintas (Móvil vs Desktop)
+    if (d.isModalClose) {
+      var openModals = getOpenModals();
+      for (var m = openModals.length - 1; m >= 0; m--) {
+        var mRoot = openModals[m];
+        try {
+          var closeBtn = mRoot.querySelector("[data-bs-dismiss='modal'], [data-dismiss='modal'], [aria-label*='close' i], [aria-label*='cerrar' i], .btn-close, .modal-close, .close, [class*='close']");
+          if (closeBtn && isVisible(closeBtn)) return closeBtn;
+          var btns = mRoot.querySelectorAll("button, a, [role='button']");
+          for (var b = 0; b < btns.length; b++) {
+            if (isModalCloseTrigger(btns[b]) && isVisible(btns[b])) return btns[b];
+          }
+        } catch (_e) {}
+      }
+    }
+
+    // Fallback para clic en el fondo (backdrop) del modal entre plantillas distintas
+    if (d.isBackdropClick) {
       try {
-        var anyEl = document.querySelector(selectors[m]);
+        var bd = document.querySelector(".modal.show, .modal.in, .modal[style*='display: block'], dialog[open], .modal-backdrop, [class*='backdrop'], [class*='modal-overlay']");
+        if (bd && isVisible(bd)) return bd;
+      } catch (_e) {}
+      var modalsForBd = getOpenModals();
+      if (modalsForBd.length) return modalsForBd[modalsForBd.length - 1];
+    }
+
+    // Último intento aunque no sea visible (p. ej. enlace en menú móvil cerrado)
+    for (var n = 0; n < selectors.length; n++) {
+      if (!selectors[n]) continue;
+      try {
+        var anyEl = document.querySelector(selectors[n]);
         if (anyEl) return anyEl;
       } catch (_e) {}
+    }
+    return null;
+  }
+
+  function findSyncedDragElement(d) {
+    var selectors = [d.selector, d.structuralSelector];
+    for (var i = 0; i < selectors.length; i++) {
+      if (!selectors[i]) continue;
+      try {
+        var el = document.querySelector(selectors[i]);
+        if (el && isVisible(el)) return el;
+      } catch (_e) {}
+    }
+    if (d.isInsideModal) {
+      var modals = getOpenModals();
+      if (modals.length) {
+        var topModal = modals[modals.length - 1];
+        var handle = topModal.querySelector(".modal-header, [class*='header'], [class*='handle'], [class*='drag']");
+        return (handle && isVisible(handle)) ? handle : topModal;
+      }
     }
     return null;
   }
@@ -1123,24 +1622,99 @@
       syncActive = !!d.active;
     } else if (d.type === "rv:do_sync_scroll") {
       if (!syncActive && !d.force) return;
-      ignoreScrollUntil = Date.now() + 90;
-      if (d.containerSelector) {
-        try {
-          var cEl = document.querySelector(d.containerSelector);
-          if (cEl) {
-            cEl.scrollLeft = d.x || 0;
-            cEl.scrollTop = d.y || 0;
+      ignoreScrollUntil = Date.now() + 110;
+      if (d.containerSelector || d.isInsideModal) {
+        var cEl = findActiveScrollableModalContainer(d.containerSelector, d.structuralSelector, d.isInsideModal);
+        if (cEl) {
+          var maxSX = Math.max(0, (cEl.scrollWidth || 0) - (cEl.clientWidth || 0));
+          var maxSY = Math.max(0, (cEl.scrollHeight || 0) - (cEl.clientHeight || 0));
+          if (typeof d.ratioX === "number" && maxSX > 0) {
+            cEl.scrollLeft = Math.round(d.ratioX * maxSX);
+          } else if (typeof d.x === "number") {
+            cEl.scrollLeft = d.x;
+          } else if (typeof d.dx === "number") {
+            cEl.scrollLeft += d.dx;
           }
-        } catch (_e) {}
-        return;
+          if (typeof d.ratioY === "number" && maxSY > 0) {
+            cEl.scrollTop = Math.round(d.ratioY * maxSY);
+          } else if (typeof d.y === "number") {
+            cEl.scrollTop = d.y;
+          } else if (typeof d.dy === "number") {
+            cEl.scrollTop += d.dy;
+          }
+          if (containerScrollMap) {
+            containerScrollMap.set(cEl, { x: cEl.scrollLeft || 0, y: cEl.scrollTop || 0 });
+          }
+          return;
+        }
+        if (d.isInsideModal) return;
       }
-      if (d.y !== undefined && d.y <= 1) {
-        window.scrollTo(d.x <= 1 ? 0 : (window.pageXOffset + d.dx), 0);
-      } else {
-        window.scrollBy(d.dx, d.dy);
+
+      var beforeY = window.pageYOffset || document.documentElement.scrollTop || 0;
+      var beforeX = window.pageXOffset || document.documentElement.scrollLeft || 0;
+      if (d.y !== undefined && d.y <= 1 && typeof d.ratioY === "number" && d.ratioY <= 0.01) {
+        window.scrollTo(d.x <= 1 ? 0 : (beforeX + (d.dx || 0)), 0);
+      } else if (typeof d.dx === "number" || typeof d.dy === "number") {
+        window.scrollBy(d.dx || 0, d.dy || 0);
+      } else if (typeof d.ratioY === "number") {
+        var vhDoc = Math.max(1, document.documentElement.clientHeight || window.innerHeight || 1);
+        var maxDocY = Math.max(0, (document.documentElement.scrollHeight || document.body.scrollHeight || vhDoc) - vhDoc);
+        window.scrollTo(beforeX, Math.round(d.ratioY * maxDocY));
       }
+      var afterY = window.pageYOffset || document.documentElement.scrollTop || 0;
+      var afterX = window.pageXOffset || document.documentElement.scrollLeft || 0;
+
+      // Si hay un modal abierto que bloquea el scroll del body (overflow: hidden) o recibe rueda desde .stage, desplazar el contenedor del modal
+      if (afterY === beforeY && afterX === beforeX && (d.dy || d.dx)) {
+        var activeModalScroller = findActiveScrollableModalContainer("", "", true);
+        if (activeModalScroller) {
+          activeModalScroller.scrollTop += (d.dy || 0);
+          activeModalScroller.scrollLeft += (d.dx || 0);
+          if (containerScrollMap) {
+            containerScrollMap.set(activeModalScroller, {
+              x: activeModalScroller.scrollLeft || 0,
+              y: activeModalScroller.scrollTop || 0
+            });
+          }
+        }
+      }
+
       lastScrollX = window.pageXOffset || document.documentElement.scrollLeft || 0;
       lastScrollY = window.pageYOffset || document.documentElement.scrollTop || 0;
+    } else if (d.type === "rv:do_sync_drag") {
+      if (!syncActive) return;
+      isReplayingSync = true;
+      try {
+        var dragEl = (d.phase === "start" || !activeDragReplayTarget)
+          ? findSyncedDragElement(d)
+          : activeDragReplayTarget;
+        if (d.phase === "start") activeDragReplayTarget = dragEl;
+        if (dragEl) {
+          var r = dragEl.getBoundingClientRect();
+          var rx = typeof d.rx === "number" ? d.rx : 0.5;
+          var ry = typeof d.ry === "number" ? d.ry : 0.5;
+          var vwCur = Math.max(1, window.innerWidth || 1);
+          var vhCur = Math.max(1, window.innerHeight || 1);
+          var scaleX = d.vw ? (vwCur / d.vw) : 1;
+          var scaleY = d.vh ? (vhCur / d.vh) : 1;
+          var startX = r.left + r.width * rx;
+          var startY = r.top + r.height * ry;
+          var curX = startX + (d.dx || 0) * scaleX;
+          var curY = startY + (d.dy || 0) * scaleY;
+          dispatchSyntheticPointerAndMouse(dragEl, d.phase, curX, curY);
+
+          if (d.modalStyleDelta) {
+            var mRoot = findEnclosingModalRoot(dragEl);
+            if (mRoot && mRoot.style) {
+              if (d.modalStyleDelta.transform !== undefined) mRoot.style.transform = d.modalStyleDelta.transform;
+              if (d.modalStyleDelta.left !== undefined) mRoot.style.left = d.modalStyleDelta.left;
+              if (d.modalStyleDelta.top !== undefined) mRoot.style.top = d.modalStyleDelta.top;
+            }
+          }
+        }
+        if (d.phase === "end") activeDragReplayTarget = null;
+      } catch (_e) {}
+      setTimeout(function () { isReplayingSync = false; }, 35);
     } else if (d.type === "rv:do_sync_click") {
       if (!syncActive) return;
       var el = findSyncedClickElement(d);
@@ -1148,8 +1722,24 @@
       try {
         if (el) {
           showSyncPulse(el);
-          if (typeof el.focus === "function") el.focus({ preventScroll: true });
-          el.click();
+          var cr = el.getBoundingClientRect();
+          var clickX = d.isBackdropClick ? (cr.left + 6) : (cr.left + cr.width * (typeof d.rx === "number" ? d.rx : 0.5));
+          var clickY = d.isBackdropClick ? (cr.top + 6) : (cr.top + cr.height * (typeof d.ry === "number" ? d.ry : 0.5));
+          if (typeof el.focus === "function" && !d.isBackdropClick) el.focus({ preventScroll: true });
+          dispatchSyntheticPointerAndMouse(el, "start", clickX, clickY);
+          dispatchSyntheticPointerAndMouse(el, "end", clickX, clickY);
+          if (d.isBackdropClick) {
+            el.dispatchEvent(new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              clientX: Math.round(clickX),
+              clientY: Math.round(clickY)
+            }));
+          } else {
+            el.click();
+          }
+          setTimeout(reportTemplateContext, 200);
         } else if (d.absHref && proxiable(d.absHref)) {
           var here = document.baseURI.split("#")[0];
           if (d.absHref.split("#")[0] !== here || d.absHref.indexOf("#") === -1) {
@@ -1158,6 +1748,35 @@
         }
       } catch (_e) {}
       setTimeout(function () { isReplayingSync = false; }, 60);
+    } else if (d.type === "rv:do_sync_key") {
+      if (!syncActive) return;
+      isReplayingSync = true;
+      try {
+        var keyTarget = null;
+        if (d.selector) {
+          try { keyTarget = document.querySelector(d.selector); } catch (_e) {}
+        }
+        if (!keyTarget) keyTarget = document.activeElement || document.body;
+        var kInit = {
+          key: d.key || "",
+          code: d.code || d.key || "",
+          keyCode: d.keyCode || (d.key === "Escape" ? 27 : (d.key === "Enter" ? 13 : 0)),
+          which: d.keyCode || (d.key === "Escape" ? 27 : (d.key === "Enter" ? 13 : 0)),
+          bubbles: true,
+          cancelable: true
+        };
+        keyTarget.dispatchEvent(new KeyboardEvent("keydown", kInit));
+        document.dispatchEvent(new KeyboardEvent("keydown", kInit));
+        window.dispatchEvent(new KeyboardEvent("keydown", kInit));
+        keyTarget.dispatchEvent(new KeyboardEvent("keyup", kInit));
+        if (d.key === "Escape") {
+          var openDialogs = document.querySelectorAll("dialog[open]");
+          for (var di = 0; di < openDialogs.length; di++) {
+            if (typeof openDialogs[di].close === "function") openDialogs[di].close();
+          }
+        }
+      } catch (_e2) {}
+      setTimeout(function () { isReplayingSync = false; }, 50);
     } else if (d.type === "rv:do_sync_input") {
       if (!syncActive) return;
       var inp = null;
