@@ -554,7 +554,9 @@
   function layout() {
     var n = state.active.length;
     matEmpty.hidden = n > 0;
-    var W = stage.clientWidth - PAD_X * 2;
+    var viewportW = document.documentElement.clientWidth || window.innerWidth || stage.clientWidth;
+    var rawStageW = Math.min(stage.clientWidth || viewportW, viewportW);
+    var W = rawStageW - PAD_X * 2;
     var H = stage.clientHeight - PAD_TOP - PAD_BOTTOM;
     if (!n || W <= 0 || H <= 0) {
       rack.style.width = rack.style.height = "";
@@ -572,11 +574,14 @@
     var isFill = state.zoomMode === "fill";
     // Detectamos monitor vertical (portrait) tanto por las dimensiones del contenedor como de la ventana/pantalla
     var isPortraitStage = H > W || window.innerHeight > window.innerWidth;
-    var forceVerticalStack = state.stackMode === "stack";
+    var hasWideDesktopOrLaptop = devices.some(function (d) {
+      return d.width >= 900 || d.kind === "desktop" || d.kind === "laptop";
+    });
+    var forceVerticalStack = state.stackMode === "stack" || (isPortraitStage && hasWideDesktopOrLaptop);
 
     // Si estamos en un monitor vertical (portrait) o en modo Apilar (Vertical),
     // cada dispositivo que esté solo en su propia fila se escala independientemente para llenar
-    // el 100% del ancho útil del monitor vertical, sin que un dispositivo de 1920px encoja al de 1366px.
+    // el ancho útil del monitor vertical, sin que un dispositivo de 1920px encoja al de 1366px.
     for (var r = 1; r <= n; r++) {
       if (forceVerticalStack && r < n) continue;
 
@@ -584,12 +589,11 @@
       if (rows.length !== r) continue;
 
       // En monitores verticales:
-      // - Nunca ponemos un Desktop/Laptop junto a otro dispositivo en la misma fila.
-      // - Si hay 3 o menos dispositivos en total, los apilamos 1 por fila para aprovechar la altura del monitor vertical.
+      // - Si hay 4 o menos dispositivos, o si cualquier fila comparte un Desktop/Laptop, los apilamos 1 por fila.
       if (!forceVerticalStack && isPortraitStage && r < n) {
-        if (n <= 3) continue;
+        if (n <= 4) continue;
         var hasDesktopSharingRow = rows.some(function (row) {
-          return row.length > 1 && row.some(function (d) { return d.width >= 900 || d.kind === "desktop"; });
+          return row.length > 1 && row.some(function (d) { return d.width >= 768 || d.kind === "desktop" || d.kind === "laptop"; });
         });
         if (hasDesktopSharingRow) continue;
       }
@@ -605,7 +609,7 @@
       var freeH = H - r * (BEZEL + CAPTION) - (r - 1) * GAP_Y;
       var heightFit = freeH / sumRowH;
       if ((isFill && isPortraitStage && r > 1) || forceVerticalStack) {
-        // En modo Fill sobre monitor vertical, priorizamos llenar el ancho del monitor
+        // En monitor vertical apilado, priorizamos llenar el ancho del monitor
         sCandidate = Math.min(sCandidate, Math.max(heightFit, sCandidate));
       } else {
         sCandidate = Math.min(sCandidate, heightFit);
@@ -624,13 +628,9 @@
     }
     state.isAutoVertical = isPortraitStage && best.rows.length === n && n > 1;
 
-    var isStackedPortrait = (isPortraitStage || forceVerticalStack) && best.rows.length > 1;
+    var isStackedPortrait = (isPortraitStage || forceVerticalStack) && best.rows.length >= 1;
     var effectiveZoomSamples = [];
 
-    // Calculamos la escala final de cada dispositivo:
-    // En monitor vertical / modo Vertical, si una fila tiene 1 solo dispositivo (ej. Laptop 1366 o Desktop 1920),
-    // ese dispositivo llena directamente el ancho disponible W (en modo Fill) o se reparte proporcionalmente el alto (en modo Fit),
-    // ignorando la penalización cruzada de `relScales` para que todos tengan el mismo ancho visual limpio.
     var extraH = isFill ? Math.max(0, best.freeH - best.sumRowH * s) : 0;
     var extraHPerRow = best.rows.length > 0 ? (extraH / best.rows.length) : 0;
 
@@ -645,24 +645,28 @@
       return Math.max(s, Math.min(s * 1.28, sByW, sByH));
     });
 
+    // Altura total cuando cada fila individual ocupa el 100% del ancho disponible (freeSingleW)
+    var freeSingleW = Math.max(120, W - BEZEL);
+    var totalHAtFullW = best.rows.reduce(function (acc, rItem) {
+      var maxRowNormH = Math.max.apply(null, rItem.map(function (rd) {
+        return rd.height * (freeSingleW / Math.max(1, rd.width));
+      }));
+      return acc + maxRowNormH;
+    }, 0);
+    var availStackH = Math.max(180, H - best.rows.length * (BEZEL + CAPTION) - (best.rows.length - 1) * GAP_Y);
+
     function computeDeviceScale(d, row, ri) {
       if (isStackedPortrait && row.length === 1 && (state.zoomMode === "fill" || state.zoomMode === "fit")) {
-        var freeW = W - BEZEL;
-        var fitWScale = freeW / d.width;
-        if (state.zoomMode === "fill" || forceVerticalStack) {
-          // Si todas las filas caben en la altura H a ancho completo, usamos 100% del ancho.
-          // Si no caben todas en H pero estamos en modo Fill, igual llenamos el 96% del ancho para que se vean grandes y nítidas.
-          var perRowFreeH = (H - best.rows.length * (BEZEL + CAPTION) - (best.rows.length - 1) * GAP_Y) / best.rows.length;
-          var fitHScale = perRowFreeH / d.height;
-          if (best.rows.length <= 2) {
-            return Math.min(fitWScale, Math.max(fitHScale, fitWScale * 0.96));
-          }
-          return Math.min(fitWScale, Math.max(fitHScale, fitWScale * 0.92));
+        var fitWScale = freeSingleW / d.width;
+        if (state.zoomMode === "fill" || state.stackMode === "stack") {
+          var hRatioFill = totalHAtFullW > 0 ? (availStackH / totalHAtFullW) : 1;
+          var fillFactor = Math.min(1.0, Math.max(0.95, hRatioFill));
+          return fitWScale * fillFactor;
         } else {
-          // Modo Fit en monitor vertical: que todas las filas quepan exactamente en la altura sin scroll, pero cada una al máximo ancho posible
-          var totalRawH = best.rows.reduce(function (acc, rItem) { return acc + rItem[0].height; }, 0);
-          var availH = H - best.rows.length * (BEZEL + CAPTION) - (best.rows.length - 1) * GAP_Y;
-          return Math.min(fitWScale, availH / totalRawH);
+          // Modo Fit en monitor vertical: todas las pantallas tienen exactamente el mismo ancho visual
+          var hRatioFit = totalHAtFullW > 0 ? (availStackH / totalHAtFullW) : 1;
+          var fitFactor = Math.min(1.0, Math.max(0.82, hRatioFit));
+          return fitWScale * fitFactor;
         }
       }
       return rowScales[ri] * relScales[d.id];

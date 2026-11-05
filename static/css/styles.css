@@ -40,8 +40,11 @@ html, body { height: 100%; }
 
 body {
   margin: 0;
+  width: 100vw;
+  max-width: 100vw;
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   background: var(--mat);
   color: var(--ink);
   font: 400 15px/1.4 var(--font-ui);
@@ -59,7 +62,10 @@ body {
 
 .mat {
   position: relative;
+  min-width: 0;
   min-height: 0;
+  width: 100%;
+  max-width: 100vw;
   overflow: hidden;
   background-color: var(--mat);
 }
@@ -295,9 +301,15 @@ body {
 
 .ruler {
   position: relative;
-  display: flex; align-items: center; gap: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100vw;
   min-height: var(--ruler-h);
-  padding: 8px 12px 6px;
+  padding: 7px 10px 6px;
   background: var(--steel);
   border-top: 1px solid var(--steel-edge);
   z-index: 2;
@@ -773,6 +785,9 @@ body {
 
 .traffic-panel {
   position: relative;
+  min-width: 0;
+  width: 100%;
+  max-width: 100vw;
   height: var(--traffic-h, 290px);
   min-height: 120px;
   max-height: calc(100vh - var(--ruler-h) - 80px);
@@ -1411,22 +1426,33 @@ body.is-traffic-standalone #traffic-resizer-top {
 
 /* ---------- Monitores verticales (Portrait ~1080px) y Pantallas pequeñas ---------- */
 
-@media (max-width: 1200px) {
+@media (max-width: 1280px), (orientation: portrait) {
   .ruler {
+    flex-wrap: wrap;
     gap: 5px;
-    padding: 7px 10px 5px;
+    padding: 6px 8px 5px;
   }
   .bar {
-    height: 30px;
+    height: 29px;
   }
   .bar-search {
-    flex: 1 1 180px;
+    flex: 1 1 160px;
+    min-width: 140px;
   }
   .btn {
-    height: 30px;
-    padding: 0 8px;
-    font-size: 12px;
-    gap: 5px;
+    height: 29px;
+    padding: 0 7px;
+    font-size: 11.5px;
+    gap: 4px;
+  }
+  .btn-traffic {
+    padding: 0 7px;
+    gap: 4px;
+  }
+  .btn-ai-report,
+  .btn-ai-snapshot {
+    padding: 0 7px;
+    gap: 4px;
   }
   .btn-refresh-hint {
     display: none;
@@ -1436,7 +1462,14 @@ body.is-traffic-standalone #traffic-resizer-top {
   }
   .traffic-toolbar {
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px;
+  }
+  .traffic-controls {
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .devtools-mode-tabs {
+    flex-wrap: wrap;
   }
   .traffic-split {
     grid-template-columns: 1fr;
@@ -1446,8 +1479,8 @@ body.is-traffic-standalone #traffic-resizer-top {
     cursor: row-resize;
     border-left: 0;
     border-right: 0;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    border-top: 1px solid #CBD5E1;
+    border-bottom: 1px solid #CBD5E1;
   }
   .traffic-split-resizer::after {
     width: 28px;
