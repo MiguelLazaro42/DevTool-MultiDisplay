@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=16">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=17">
 </head>
 <body>
   <main class="mat" aria-label="Screens" data-i18n-aria-label="screens">
@@ -128,8 +128,8 @@
       </div>
 
       <div class="traffic-actions">
-        <button type="button" class="traffic-btn traffic-btn-ai" id="panel-ai-report-btn" data-i18n="aiReportBtn" data-i18n-title="aiReportHint">✨ Reporte IA</button>
-        <button type="button" class="traffic-btn" id="panel-snapshot-btn" data-i18n="snapshotBtn" data-i18n-title="snapshotHint">📸 Captura</button>
+        <button type="button" class="traffic-btn traffic-btn-ai" id="panel-ai-report-btn" data-i18n="aiReportBtn" data-i18n-title="aiReportHint">Reporte</button>
+        <button type="button" class="traffic-btn" id="panel-snapshot-btn" data-i18n="snapshotBtn" data-i18n-title="snapshotHint">Captura</button>
         <button type="button" class="traffic-btn" id="traffic-pause-btn" data-i18n="trafficPause">Pausar</button>
         <button type="button" class="traffic-btn" id="traffic-clear-btn" data-i18n="trafficClear">Limpiar</button>
         <button type="button" class="traffic-btn traffic-btn-popout" id="traffic-popout-btn" data-i18n="trafficPopout" data-i18n-title="trafficPopoutHint">Ventana independiente ↗</button>
@@ -241,12 +241,12 @@
       <div class="traffic-detail">
         <div class="traffic-detail-bar">
           <div class="traffic-tabs">
-            <button type="button" class="traffic-chip" id="audit-scan-btn" data-i18n="auditScanBtn">🔄 Escanear pantallas</button>
-            <button type="button" class="traffic-chip" id="audit-highlight-btn" aria-pressed="false" data-i18n="auditHighlightBtn">🎯 Resaltar en pantallas</button>
+            <button type="button" class="traffic-chip" id="audit-scan-btn" data-i18n="auditScanBtn">Escanear pantallas</button>
+            <button type="button" class="traffic-chip" id="audit-highlight-btn" aria-pressed="false" data-i18n="auditHighlightBtn">Resaltar en pantallas</button>
           </div>
           <div class="traffic-detail-actions">
             <button type="button" class="traffic-chip" id="audit-copy-one-btn" data-i18n="auditCopyOne">Copiar este problema</button>
-            <button type="button" class="traffic-chip traffic-chip-accent" id="audit-copy-all-btn" data-i18n="auditCopyAll">Copiar todos para IA</button>
+            <button type="button" class="traffic-chip traffic-chip-accent" id="audit-copy-all-btn" data-i18n="auditCopyAll">Copiar todos</button>
           </div>
         </div>
         <div class="traffic-raw-wrap">
@@ -279,11 +279,11 @@
       <div class="traffic-detail">
         <div class="traffic-detail-bar">
           <div class="traffic-tabs" role="tablist">
-            <button type="button" class="traffic-tab is-active" id="flow-tab-md" data-flowtab="markdown">Pasos para IA (Markdown)</button>
+            <button type="button" class="traffic-tab is-active" id="flow-tab-md" data-flowtab="markdown">Pasos (Markdown)</button>
             <button type="button" class="traffic-tab" id="flow-tab-pw" data-flowtab="playwright">Test Playwright (.spec.js)</button>
           </div>
           <div class="traffic-detail-actions">
-            <button type="button" class="traffic-chip" id="flow-record-toggle" aria-pressed="true">● Grabando</button>
+            <button type="button" class="traffic-chip is-active" id="flow-record-toggle" aria-pressed="true">Grabando</button>
             <button type="button" class="traffic-chip traffic-chip-accent" id="flow-copy-btn" data-i18n="flowCopyBtn">Copiar Flujo</button>
           </div>
         </div>
@@ -316,11 +316,11 @@
       <div class="traffic-detail">
         <div class="traffic-detail-bar">
           <div class="traffic-tabs">
-            <button type="button" class="traffic-chip" id="storage-refresh-btn">🔄 Actualizar Storage</button>
+            <button type="button" class="traffic-chip" id="storage-refresh-btn">Actualizar Storage</button>
           </div>
           <div class="traffic-detail-actions">
             <button type="button" class="traffic-chip" id="storage-copy-one-btn">Copiar valor</button>
-            <button type="button" class="traffic-chip traffic-chip-accent" id="storage-copy-all-btn">Copiar Storage para IA</button>
+            <button type="button" class="traffic-chip traffic-chip-accent" id="storage-copy-all-btn">Copiar todo</button>
           </div>
         </div>
         <div class="traffic-raw-wrap">
@@ -417,15 +417,22 @@
 
     <div class="bar bar-ai-group">
       <button type="button" class="btn btn-ai-report" id="ai-report-btn"
-              title="Copia al instante un reporte completo para IA (Elemento + Consola + HTTP + Problemas Visuales + Flujo + Storage)"
+              title="Copia al instante un reporte completo de diagnóstico (Elemento + Consola + HTTP + Problemas Visuales + Flujo + Storage)"
               data-i18n-title="aiReportHint">
-        <span aria-hidden="true">✨</span>
-        <span data-i18n="aiReportBtn">Reporte IA</span>
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <rect x="4" y="3" width="12" height="14" rx="1.8"/>
+          <path d="M7 7h6M7 10.5h6M7 14h4"/>
+        </svg>
+        <span data-i18n="aiReportBtn">Reporte</span>
       </button>
       <button type="button" class="btn btn-ai-snapshot" id="snapshot-btn"
-              title="Copiar captura visual anotada al portapapeles (PNG)"
-              data-i18n-title="snapshotHint" aria-label="Captura visual anotada">
-        <span aria-hidden="true">📸</span>
+              title="Copiar captura visual al portapapeles (PNG)"
+              data-i18n-title="snapshotHint" aria-label="Captura visual">
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h2.1l1.1-1.5h4.6L13.4 5h2.1A1.5 1.5 0 0 1 17 6.5v8A1.5 1.5 0 0 1 15.5 16h-11A1.5 1.5 0 0 1 3 14.5v-8Z"/>
+          <circle cx="10" cy="10.5" r="2.8"/>
+        </svg>
+        <span data-i18n="snapshotBtn">Captura</span>
       </button>
     </div>
 
@@ -447,13 +454,13 @@
     </div>
   </footer>
 
-  <!-- Modal de Reporte de Contexto para IA (copia en 1 clic + personalización + captura PNG) -->
+  <!-- Modal de Reporte de Contexto (copia en 1 clic + personalización + captura PNG) -->
   <div class="ai-modal-backdrop" id="ai-report-modal" hidden>
     <div class="ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-modal-title">
       <header class="ai-modal-header">
-        <div class="ai-modal-title-group">
-          <span class="ai-modal-badge">✨ IA Context Bundle</span>
-          <h2 id="ai-modal-title" class="ai-modal-title">Reporte para IA listo (¡Ya copiado a tu portapapeles!)</h2>
+        <div class="ai-modal-title-wrap">
+          <span class="ai-modal-badge">Diagnóstico</span>
+          <h2 id="ai-modal-title" class="ai-modal-title">Reporte técnico (copiado al portapapeles)</h2>
         </div>
         <button type="button" class="traffic-btn-icon" id="ai-modal-close" aria-label="Cerrar">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15"/></svg>
@@ -461,12 +468,12 @@
       </header>
 
       <div class="ai-modal-toggles" id="ai-modal-toggles">
-        <label class="ai-toggle-chip"><input type="checkbox" data-sec="element" checked> <span>🎯 Elemento + CSS</span></label>
-        <label class="ai-toggle-chip"><input type="checkbox" data-sec="console" checked> <span>🚨 Consola / Errores</span></label>
-        <label class="ai-toggle-chip"><input type="checkbox" data-sec="http" checked> <span>🌐 Peticiones HTTP</span></label>
-        <label class="ai-toggle-chip"><input type="checkbox" data-sec="audit" checked> <span>📐 Auditoría Visual</span></label>
-        <label class="ai-toggle-chip"><input type="checkbox" data-sec="flow" checked> <span>👣 Flujo de Pasos</span></label>
-        <label class="ai-toggle-chip"><input type="checkbox" data-sec="storage" checked> <span>🔑 Storage / Cookies / JWT</span></label>
+        <label class="ai-toggle-chip"><input type="checkbox" data-sec="element" checked> <span>Elemento + CSS</span></label>
+        <label class="ai-toggle-chip"><input type="checkbox" data-sec="console" checked> <span>Consola / Errores</span></label>
+        <label class="ai-toggle-chip"><input type="checkbox" data-sec="http" checked> <span>Peticiones HTTP</span></label>
+        <label class="ai-toggle-chip"><input type="checkbox" data-sec="audit" checked> <span>Auditoría Visual</span></label>
+        <label class="ai-toggle-chip"><input type="checkbox" data-sec="flow" checked> <span>Flujo de Pasos</span></label>
+        <label class="ai-toggle-chip"><input type="checkbox" data-sec="storage" checked> <span>Storage / Cookies / JWT</span></label>
       </div>
 
       <div class="ai-modal-body">
@@ -474,10 +481,10 @@
       </div>
 
       <footer class="ai-modal-footer">
-        <span class="ai-modal-hint">Pégalo directamente con <kbd>⌘V</kbd> / <kbd>Ctrl+V</kbd> en tu chat con la IA.</span>
+        <span class="ai-modal-hint">Pégalo directamente con <kbd>⌘V</kbd> / <kbd>Ctrl+V</kbd>.</span>
         <div class="ai-modal-actions">
-          <button type="button" class="traffic-btn" id="ai-modal-snapshot-btn">📸 Copiar Captura Anotada (PNG)</button>
-          <button type="button" class="traffic-btn traffic-btn-ai" id="ai-modal-copy-btn">📋 Volver a copiar Markdown</button>
+          <button type="button" class="traffic-btn" id="ai-modal-snapshot-btn">Copiar Captura (PNG)</button>
+          <button type="button" class="traffic-btn traffic-btn-ai" id="ai-modal-copy-btn">Copiar Markdown</button>
         </div>
       </footer>
     </div>
@@ -487,7 +494,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=16"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=16"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=17"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=17"></script>
 </body>
 </html>

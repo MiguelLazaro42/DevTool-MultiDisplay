@@ -424,7 +424,7 @@
         }
       }
       if (box.overflowRightPx > 1) {
-        summaryParts.unshift("⚠ overflow-x: +" + box.overflowRightPx + "px");
+        summaryParts.unshift("overflow-x: +" + box.overflowRightPx + "px");
       }
     } catch (_e) {}
     return {
@@ -1128,7 +1128,7 @@
       var vw = document.documentElement.clientWidth || window.innerWidth || 0;
       var vh = document.documentElement.clientHeight || window.innerHeight || 0;
       var all = document.body ? document.body.querySelectorAll("*") : [];
-      var limit = Math.min(all.length, 320);
+      var limit = Math.min(all.length, 3000);
 
       for (var i = 0; i < limit; i++) {
         var el = all[i];
@@ -1155,6 +1155,8 @@
         }
 
         if (bg || bCol || directText || tag === "img" || tag === "button" || tag === "input") {
+          var z = parseInt(cs.zIndex, 10);
+          var isFixed = cs.position === "fixed" || tag === "dialog" || el.getAttribute("aria-modal") === "true";
           nodes.push({
             tag: tag,
             x: Math.round(r.left),
@@ -1167,10 +1169,18 @@
             text: directText,
             color: cs.color || "#111827",
             fontSize: Math.min(28, Math.max(9, parseFloat(cs.fontSize) || 13)),
-            fontWeight: cs.fontWeight || "400"
+            fontWeight: cs.fontWeight || "400",
+            tier: isFixed ? 2 : (cs.position !== "static" ? 1 : 0),
+            z: isNaN(z) ? 0 : z,
+            order: i
           });
         }
       }
+      nodes.sort(function (a, b) {
+        if (a.tier !== b.tier) return a.tier - b.tier;
+        if (a.z !== b.z) return a.z - b.z;
+        return a.order - b.order;
+      });
     } catch (_e) {}
 
     try {

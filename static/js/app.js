@@ -278,7 +278,7 @@
   }
 
   // ---------- Pantallas ----------
-  var FALLBACK_COLORS = ["#38BDF8", "#A855F7", "#EC4899", "#22C55E", "#F59E0B", "#14B8A6", "#6366F1", "#FB923C", "#E879F9", "#F43F5E"];
+  var FALLBACK_COLORS = ["#0284C7", "#2563EB", "#0891B2", "#16A34A", "#D97706", "#0D9488", "#059669", "#EA580C", "#65A30D", "#DC2626"];
   function deviceColor(id) {
     var d = BY_ID[id];
     if (d && d.color) return d.color;
@@ -1502,7 +1502,7 @@
     CATALOG.forEach(function (d) {
       var opt = document.createElement("option");
       opt.value = d.id;
-      opt.textContent = "● " + d.name;
+      opt.textContent = d.name;
       opt.style.color = deviceColor(d.id);
       trafficDeviceFilter.appendChild(opt);
     });
@@ -2300,7 +2300,7 @@
       var tdDev = document.createElement("td");
       tdDev.className = "col-device";
       if (row.device_id === "all") {
-        tdDev.textContent = "🌐 " + row.device_name;
+        tdDev.textContent = row.device_name;
       } else {
         tdDev.appendChild(buildDeviceChip(row.device_id, row.device_name));
       }
@@ -2313,7 +2313,7 @@
       var tdVal = document.createElement("td");
       tdVal.className = "col-cmsg";
       tdVal.textContent = row.jwt && row.jwt.expStatus
-        ? ("🔑 [" + row.jwt.expStatus.summary + "] " + row.value)
+        ? ("[" + row.jwt.expStatus.summary + "] " + row.value)
         : row.value;
       tdVal.title = row.value;
 
@@ -2467,7 +2467,7 @@
     });
 
     var md = [
-      "# 🐛 Reporte de Contexto Web para IA",
+      "# Reporte de Diagnóstico Web",
       "- **URL activa:** " + (state.url || "—"),
       "- **Pantallas activas (" + activeDevs.length + "):** " + (activeDevs.join(", ") || "Ninguna"),
       "- **Hora de captura:** " + nowStr,
@@ -2640,6 +2640,546 @@
     });
   }
 
+  var MODAL_HINT_RE = /\b(modal|dialog|overlay|backdrop|drawer|popup|popover|lightbox|sheet|swal|toast)\b/i;
+
+  function isTransparentColor(c) {
+    return !c || c === "transparent" || c === "rgba(0, 0, 0, 0)";
+  }
+
+  function parseCssRadius(val, w, h) {
+    if (!val) return 0;
+    var first = String(val).trim().split(/\s+/)[0];
+    if (!first) return 0;
+    var num = parseFloat(first);
+    if (isNaN(num) || num <= 0) return 0;
+    if (first.indexOf("%") > -1) {
+      return Math.min(w, h) * (num / 100);
+    }
+    return Math.min(num, Math.min(w, h) / 2);
+  }
+
+  function traceRoundRect(ctx, x, y, w, h, r) {
+    var rad = Math.max(0, Math.min(r || 0, Math.min(w, h) / 2));
+    ctx.beginPath();
+    if (rad <= 0.5) {
+      ctx.rect(x, y, w, h);
+      return;
+    }
+    ctx.moveTo(x + rad, y);
+    ctx.lineTo(x + w - rad, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rad);
+    ctx.lineTo(x + w, y + h - rad);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rad, y + h);
+    ctx.lineTo(x + rad, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rad);
+    ctx.lineTo(x, y + rad);
+    ctx.quadraticCurveTo(x, y, x + rad, y);
+    ctx.closePath();
+  }
+
+  function extractGradientColors(bgImage) {
+    if (!bgImage || bgImage === "none" || bgImage.indexOf("gradient") === -1) return null;
+    var matches = bgImage.match(/(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8})/g);
+    if (!matches || matches.length < 2) return null;
+    return [matches[0], matches[matches.length - 1]];
+  }
+
+  var taintTestCanvas = null;
+  var taintTestCtx = null;
+  function canDrawImageSafely(imgEl) {
+    try {
+      if (!taintTestCanvas) {
+        taintTestCanvas = document.createElement("canvas");
+        taintTestCanvas.width = 2;
+        taintTestCanvas.height = 2;
+        taintTestCtx = taintTestCanvas.getContext("2d");
+      }
+      taintTestCtx.clearRect(0, 0, 2, 2);
+      taintTestCtx.drawImage(imgEl, 0, 0, 1, 1);
+      taintTestCtx.getImageData(0, 0, 1, 1);
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function paintLiveIframeDom(ctx, iframe, dx, dy, dw, dh, dWidth, dHeight, fallbackSnap) {
+    var scale = dw / Math.max(1, dWidth);
+    var doc = null;
+    var win = null;
+    try {
+      doc = iframe && iframe.contentDocument;
+      win = iframe && iframe.contentWindow;
+    } catch (_e) {
+      doc = null;
+      win = null;
+    }
+
+    if (!doc || !win || !doc.body) {
+      // Fallback si el documento no es accesible directamente
+      var bgCol = (fallbackSnap && (fallbackSnap.bgPage || fallbackSnap.bg) && !isTransparentColor(fallbackSnap.bgPage || fallbackSnap.bg))
+        ? (fallbackSnap.bgPage || fallbackSnap.bg)
+        : "#FFFFFF";
+      ctx.fillStyle = bgCol;
+      ctx.fillRect(dx, dy, dw, dh);
+      if (fallbackSnap && Array.isArray(fallbackSnap.nodes)) {
+        fallbackSnap.nodes.forEach(function (n) {
+          var nx = dx + n.x * scale;
+          var ny = dy + n.y * scale;
+          var nw = n.w * scale;
+          var nh = n.h * scale;
+          if (n.bg) { ctx.fillStyle = n.bg; ctx.fillRect(nx, ny, nw, nh); }
+          var borderCol = n.border || n.bCol;
+          if (borderCol) { ctx.strokeStyle = borderCol; ctx.lineWidth = 1; ctx.strokeRect(nx, ny, nw, nh); }
+          if (n.text) {
+            ctx.fillStyle = n.color || "#1B1F1D";
+            var fSize = Math.max(7, Math.min(22, Math.round(((n.fontSize || n.fSize || 13)) * scale)));
+            ctx.font = fSize + "px -apple-system, sans-serif";
+            ctx.fillText(n.text.slice(0, 50), nx + 3, ny + Math.min(nh - 2, fSize + 3));
+          }
+        });
+      }
+      return;
+    }
+
+    // 1. Fondo base del documento (html / body)
+    var htmlCs = win.getComputedStyle(doc.documentElement);
+    var bodyCs = win.getComputedStyle(doc.body);
+    var pageBg = "#FFFFFF";
+    if (bodyCs && !isTransparentColor(bodyCs.backgroundColor)) {
+      pageBg = bodyCs.backgroundColor;
+    } else if (htmlCs && !isTransparentColor(htmlCs.backgroundColor)) {
+      pageBg = htmlCs.backgroundColor;
+    }
+    ctx.fillStyle = pageBg;
+    ctx.fillRect(dx, dy, dw, dh);
+
+    var vw = win.innerWidth || dWidth;
+    var vh = win.innerHeight || dHeight;
+
+    // 2. Recorrer todos los elementos del DOM (sin límite de 320 nodos para incluir portales y modales al final del body)
+    var allNodes = doc.body.querySelectorAll("*");
+    var maxNodes = Math.min(allNodes.length, 4500);
+    var items = [];
+
+    for (var i = 0; i < maxNodes; i++) {
+      var el = allNodes[i];
+      var tag = (el.tagName || "").toLowerCase();
+      if (tag === "script" || tag === "style" || tag === "link" || tag === "meta" || tag === "noscript" || tag === "template") continue;
+      if (el.id && el.id.indexOf("__rv_") === 0) continue;
+      if (el.namespaceURI === "http://www.w3.org/2000/svg" && tag !== "svg") continue;
+
+      var cs = win.getComputedStyle(el);
+      if (!cs || cs.display === "none" || cs.visibility === "hidden" || cs.visibility === "collapse") continue;
+
+      var rect = el.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) continue;
+      if (rect.bottom < 0 || rect.right < 0 || rect.top > vh || rect.left > vw) continue;
+
+      // Calcular opacidad efectiva, contexto de apilamiento (modales/overlays/fixed) y recorte (overflow)
+      var effOpacity = 1;
+      var tier = 0;
+      var effZ = 0;
+      var isModalTree = false;
+      var isFixedTree = false;
+      var clipBox = { left: 0, top: 0, right: vw, bottom: vh };
+      var stoppedClipForFixed = false;
+
+      var cur = el;
+      while (cur && cur !== doc.documentElement) {
+        var curCs = (cur === el) ? cs : win.getComputedStyle(cur);
+        if (!curCs) break;
+        if (curCs.display === "none" || curCs.visibility === "hidden") {
+          effOpacity = 0;
+          break;
+        }
+        var op = parseFloat(curCs.opacity);
+        if (!isNaN(op)) effOpacity *= op;
+        if (effOpacity <= 0.01) break;
+
+        var pos = curCs.position;
+        var zVal = parseInt(curCs.zIndex, 10);
+        var hasZ = !isNaN(zVal);
+        var curTag = (cur.tagName || "").toLowerCase();
+        var role = cur.getAttribute ? (cur.getAttribute("role") || "") : "";
+        var ariaModal = cur.getAttribute ? (cur.getAttribute("aria-modal") || "") : "";
+        var clsAndId = ((typeof cur.className === "string" ? cur.className : "") + " " + (cur.id || ""));
+
+        if (curTag === "dialog") {
+          if (!cur.hasAttribute("open") && curCs.display === "none") {
+            effOpacity = 0;
+            break;
+          }
+          isModalTree = true;
+        }
+        if (ariaModal === "true" || role === "dialog" || role === "alertdialog") {
+          isModalTree = true;
+        }
+        if ((pos === "fixed" || pos === "absolute") && MODAL_HINT_RE.test(clsAndId)) {
+          isModalTree = true;
+        }
+        if (pos === "fixed") {
+          isFixedTree = true;
+          var curRect = (cur === el) ? rect : cur.getBoundingClientRect();
+          if (curRect.width >= vw * 0.75 && curRect.height >= vh * 0.75) {
+            isModalTree = true;
+          }
+          stoppedClipForFixed = true;
+        }
+        if (hasZ && zVal >= 40 && (pos === "fixed" || pos === "absolute")) {
+          if ( zVal >= 100 || MODAL_HINT_RE.test(clsAndId)) {
+            isModalTree = true;
+          }
+        }
+        if (hasZ && zVal > effZ) {
+          effZ = zVal;
+        }
+
+        // Recorte por contenedores con overflow hidden/auto/scroll
+        if (!stoppedClipForFixed && cur !== el && cur !== doc.body) {
+          var ovX = curCs.overflowX;
+          var ovY = curCs.overflowY;
+          if (ovX === "hidden" || ovX === "scroll" || ovX === "auto" || ovX === "clip" ||
+              ovY === "hidden" || ovY === "scroll" || ovY === "auto" || ovY === "clip") {
+            var cRect = cur.getBoundingClientRect();
+            clipBox.left = Math.max(clipBox.left, cRect.left);
+            clipBox.top = Math.max(clipBox.top, cRect.top);
+            clipBox.right = Math.min(clipBox.right, cRect.right);
+            clipBox.bottom = Math.min(clipBox.bottom, cRect.bottom);
+          }
+        }
+        cur = cur.parentElement;
+      }
+
+      if (effOpacity <= 0.01) continue;
+      if (clipBox.right <= clipBox.left || clipBox.bottom <= clipBox.top) continue;
+      if (rect.right <= clipBox.left || rect.left >= clipBox.right || rect.bottom <= clipBox.top || rect.top >= clipBox.bottom) continue;
+
+      if (isModalTree) {
+        tier = 3;
+      } else if (isFixedTree) {
+        tier = 2;
+      } else if (cs.position !== "static" || effZ !== 0) {
+        tier = 1;
+      } else {
+        tier = 0;
+      }
+
+      items.push({
+        el: el,
+        tag: tag,
+        cs: cs,
+        rect: rect,
+        clipBox: clipBox,
+        effOpacity: effOpacity,
+        tier: tier,
+        effZ: effZ,
+        domOrder: i
+      });
+    }
+
+    // 3. Ordenar por capa real de apilamiento (flujo normal -> posicionados -> fixed -> modales/overlays)
+    items.sort(function (a, b) {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      if (a.effZ !== b.effZ) return a.effZ - b.effZ;
+      return a.domOrder - b.domOrder;
+    });
+
+    var textRange = doc.createRange();
+
+    // 4. Pintar cada elemento en orden de apilamiento
+    for (var idx = 0; idx < items.length; idx++) {
+      var it = items[idx];
+      var el = it.el;
+      var tag = it.tag;
+      var cs = it.cs;
+      var rect = it.rect;
+
+      var nx = dx + rect.left * scale;
+      var ny = dy + rect.top * scale;
+      var nw = rect.width * scale;
+      var nh = rect.height * scale;
+
+      ctx.save();
+
+      // Recorte del contenedor padre si aplica
+      var cx = dx + Math.max(0, it.clipBox.left) * scale;
+      var cy = dy + Math.max(0, it.clipBox.top) * scale;
+      var cw = Math.min(vw, it.clipBox.right) * scale - Math.max(0, it.clipBox.left) * scale;
+      var ch = Math.min(vh, it.clipBox.bottom) * scale - Math.max(0, it.clipBox.top) * scale;
+      ctx.beginPath();
+      ctx.rect(cx, cy, Math.max(1, cw), Math.max(1, ch));
+      ctx.clip();
+
+      ctx.globalAlpha = Math.max(0, Math.min(1, it.effOpacity));
+
+      // Si es un <dialog open>, pintar su ::backdrop si existe
+      if (tag === "dialog") {
+        var bdCs = win.getComputedStyle(el, "::backdrop");
+        var bdCol = (bdCs && !isTransparentColor(bdCs.backgroundColor)) ? bdCs.backgroundColor : "rgba(15, 23, 42, 0.45)";
+        ctx.fillStyle = bdCol;
+        ctx.fillRect(dx, dy, dw, dh);
+      }
+
+      var radius = parseCssRadius(cs.borderTopLeftRadius || cs.borderRadius, nw, nh);
+
+      // Sombra (box-shadow) para tarjetas y modales
+      var bShadow = cs.boxShadow;
+      if (bShadow && bShadow !== "none" && bShadow.indexOf("inset") === -1) {
+        var shColMatch = bShadow.match(/(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8})/);
+        if (shColMatch) {
+          ctx.save();
+          ctx.shadowColor = shColMatch[0];
+          ctx.shadowBlur = Math.min(24, (it.tier >= 3 ? 18 : 8) * scale);
+          ctx.shadowOffsetX = 0;
+          ctx.shadowOffsetY = (it.tier >= 3 ? 6 : 2) * scale;
+          traceRoundRect(ctx, nx, ny, nw, nh, radius);
+          ctx.fillStyle = !isTransparentColor(cs.backgroundColor) ? cs.backgroundColor : "rgba(255,255,255,0.01)";
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      // Fondo (color sólido o gradiente lineal)
+      var bgCol = cs.backgroundColor;
+      var gradCols = extractGradientColors(cs.backgroundImage);
+      if (gradCols) {
+        var grad = ctx.createLinearGradient(nx, ny, nx + nw, ny + nh);
+        grad.addColorStop(0, gradCols[0]);
+        grad.addColorStop(1, gradCols[1]);
+        traceRoundRect(ctx, nx, ny, nw, nh, radius);
+        ctx.fillStyle = grad;
+        ctx.fill();
+      } else if (!isTransparentColor(bgCol)) {
+        traceRoundRect(ctx, nx, ny, nw, nh, radius);
+        ctx.fillStyle = bgCol;
+        ctx.fill();
+      } else if (it.tier >= 3 && (cs.backdropFilter && cs.backdropFilter !== "none" || cs.webkitBackdropFilter && cs.webkitBackdropFilter !== "none")) {
+        traceRoundRect(ctx, nx, ny, nw, nh, radius);
+        ctx.fillStyle = "rgba(15, 23, 42, 0.28)";
+        ctx.fill();
+      }
+
+      // Imágenes reales (<img> y <canvas>)
+      if (tag === "img") {
+        var drawnImg = false;
+        if (el.complete && el.naturalWidth > 0 && canDrawImageSafely(el)) {
+          try {
+            ctx.save();
+            traceRoundRect(ctx, nx, ny, nw, nh, radius);
+            ctx.clip();
+            ctx.drawImage(el, nx, ny, nw, nh);
+            ctx.restore();
+            drawnImg = true;
+          } catch (_e) {
+            drawnImg = false;
+          }
+        }
+        if (!drawnImg) {
+          traceRoundRect(ctx, nx, ny, nw, nh, radius);
+          ctx.fillStyle = "rgba(148, 163, 184, 0.18)";
+          ctx.fill();
+        }
+      } else if (tag === "canvas") {
+        if (canDrawImageSafely(el)) {
+          try {
+            ctx.drawImage(el, nx, ny, nw, nh);
+          } catch (_e) {}
+        }
+      } else if (tag === "svg" && typeof Path2D !== "undefined") {
+        // Renderizado vectorial de iconos SVG
+        try {
+          var vb = el.viewBox && el.viewBox.baseVal;
+          var vbW = (vb && vb.width) ? vb.width : (parseFloat(el.getAttribute("width")) || 24);
+          var vbH = (vb && vb.height) ? vb.height : (parseFloat(el.getAttribute("height")) || 24);
+          var vbX = (vb && vb.x) ? vb.x : 0;
+          var vbY = (vb && vb.y) ? vb.y : 0;
+          if (vbW > 0 && vbH > 0) {
+            ctx.save();
+            ctx.translate(nx, ny);
+            ctx.scale(nw / vbW, nh / vbH);
+            ctx.translate(-vbX, -vbY);
+            var svgPaths = el.querySelectorAll("path");
+            var svgColor = cs.color || "#1B1F1D";
+            for (var sp = 0; sp < svgPaths.length; sp++) {
+              var pEl = svgPaths[sp];
+              var dAttr = pEl.getAttribute("d");
+              if (!dAttr) continue;
+              var pCs = win.getComputedStyle(pEl);
+              var p2d = new Path2D(dAttr);
+              var fillAttr = pEl.getAttribute("fill") || (pCs && pCs.fill) || "";
+              var strokeAttr = pEl.getAttribute("stroke") || (pCs && pCs.stroke) || "";
+              if (fillAttr && fillAttr !== "none" && !isTransparentColor(fillAttr)) {
+                ctx.fillStyle = (fillAttr === "currentColor") ? svgColor : fillAttr;
+                ctx.fill(p2d);
+              }
+              if (strokeAttr && strokeAttr !== "none" && !isTransparentColor(strokeAttr)) {
+                ctx.strokeStyle = (strokeAttr === "currentColor") ? svgColor : strokeAttr;
+                ctx.lineWidth = parseFloat(pEl.getAttribute("stroke-width") || (pCs && pCs.strokeWidth) || "1.8") || 1.8;
+                ctx.stroke(p2d);
+              } else if (!fillAttr || fillAttr === "currentColor") {
+                ctx.fillStyle = svgColor;
+                ctx.fill(p2d);
+              }
+            }
+            ctx.restore();
+          }
+        } catch (_e) {}
+      }
+
+      // Bordes (uniformes o por lado)
+      var btW = parseFloat(cs.borderTopWidth) || 0;
+      var brW = parseFloat(cs.borderRightWidth) || 0;
+      var bbW = parseFloat(cs.borderBottomWidth) || 0;
+      var blW = parseFloat(cs.borderLeftWidth) || 0;
+      if (btW > 0 || brW > 0 || bbW > 0 || blW > 0) {
+        if (btW > 0 && Math.abs(btW - brW) < 0.5 && Math.abs(btW - bbW) < 0.5 && Math.abs(btW - blW) < 0.5 && !isTransparentColor(cs.borderTopColor)) {
+          traceRoundRect(ctx, nx, ny, nw, nh, radius);
+          ctx.strokeStyle = cs.borderTopColor;
+          ctx.lineWidth = Math.max(0.75, btW * scale);
+          ctx.stroke();
+        } else {
+          if (btW > 0 && !isTransparentColor(cs.borderTopColor)) {
+            ctx.strokeStyle = cs.borderTopColor;
+            ctx.lineWidth = Math.max(0.75, btW * scale);
+            ctx.beginPath(); ctx.moveTo(nx, ny); ctx.lineTo(nx + nw, ny); ctx.stroke();
+          }
+          if (bbW > 0 && !isTransparentColor(cs.borderBottomColor)) {
+            ctx.strokeStyle = cs.borderBottomColor;
+            ctx.lineWidth = Math.max(0.75, bbW * scale);
+            ctx.beginPath(); ctx.moveTo(nx, ny + nh); ctx.lineTo(nx + nw, ny + nh); ctx.stroke();
+          }
+          if (blW > 0 && !isTransparentColor(cs.borderLeftColor)) {
+            ctx.strokeStyle = cs.borderLeftColor;
+            ctx.lineWidth = Math.max(0.75, blW * scale);
+            ctx.beginPath(); ctx.moveTo(nx, ny); ctx.lineTo(nx, ny + nh); ctx.stroke();
+          }
+          if (brW > 0 && !isTransparentColor(cs.borderRightColor)) {
+            ctx.strokeStyle = cs.borderRightColor;
+            ctx.lineWidth = Math.max(0.75, brW * scale);
+            ctx.beginPath(); ctx.moveTo(nx + nw, ny); ctx.lineTo(nx + nw, ny + nh); ctx.stroke();
+          }
+        }
+      }
+
+      // Controles de formulario (<input>, <textarea>, <select>)
+      if (tag === "input" || tag === "textarea" || tag === "select") {
+        var inType = (el.getAttribute("type") || "text").toLowerCase();
+        if (inType === "checkbox" || inType === "radio") {
+          ctx.strokeStyle = "#64748B";
+          ctx.lineWidth = 1.2;
+          traceRoundRect(ctx, nx + 1, ny + 1, nw - 2, nh - 2, inType === "radio" ? nw / 2 : 3 * scale);
+          ctx.stroke();
+          if (el.checked) {
+            ctx.fillStyle = "#1A73E8";
+            traceRoundRect(ctx, nx + 3 * scale, ny + 3 * scale, nw - 6 * scale, nh - 6 * scale, inType === "radio" ? nw / 2 : 2 * scale);
+            ctx.fill();
+          }
+        } else if (inType !== "hidden") {
+          var valStr = "";
+          var isPlaceholder = false;
+          if (tag === "select") {
+            valStr = (el.options && el.selectedIndex >= 0 && el.options[el.selectedIndex])
+              ? el.options[el.selectedIndex].text
+              : (el.value || "");
+          } else if (inType === "password" && el.value) {
+            valStr = new Array(Math.min(20, el.value.length) + 1).join("•");
+          } else if (el.value) {
+            valStr = el.value;
+          } else if (el.getAttribute("placeholder")) {
+            valStr = el.getAttribute("placeholder");
+            isPlaceholder = true;
+          }
+          if (valStr) {
+            var fSizeIn = Math.max(6, Math.min(26, (parseFloat(cs.fontSize) || 13) * scale));
+            var fwIn = parseInt(cs.fontWeight || "400", 10);
+            ctx.font = (fwIn >= 600 ? "600 " : "400 ") + fSizeIn + "px " + (cs.fontFamily || "-apple-system, sans-serif");
+            ctx.fillStyle = isPlaceholder ? "rgba(100, 116, 139, 0.75)" : (cs.color || "#1B1F1D");
+            ctx.textBaseline = "middle";
+            var padL = (parseFloat(cs.paddingLeft) || 8) * scale;
+            var textY = tag === "textarea" ? (ny + (parseFloat(cs.paddingTop) || 8) * scale + fSizeIn * 0.6) : (ny + nh / 2);
+            ctx.save();
+            traceRoundRect(ctx, nx + 1, ny + 1, nw - 2, nh - 2, radius);
+            ctx.clip();
+            ctx.fillText(valStr.replace(/\s+/g, " ").slice(0, 90), nx + padL, textY);
+            ctx.restore();
+          }
+        }
+      }
+
+      // Nodos de texto directos (con posicionamiento exacto por línea vía Range.getClientRects)
+      var childNodes = el.childNodes;
+      if (childNodes && childNodes.length > 0 && tag !== "script" && tag !== "style" && tag !== "select" && tag !== "textarea") {
+        var fSize = Math.max(5.5, Math.min(36, (parseFloat(cs.fontSize) || 13) * scale));
+        var fwNum = parseInt(cs.fontWeight || "400", 10);
+        var fStyle = (cs.fontStyle === "italic" ? "italic " : "");
+        var fWeight = (!isNaN(fwNum) && fwNum >= 600) || cs.fontWeight === "bold" ? "600 " : "400 ";
+        ctx.font = fStyle + fWeight + fSize + "px " + (cs.fontFamily || "-apple-system, BlinkMacSystemFont, sans-serif");
+        ctx.fillStyle = cs.color || "#1B1F1D";
+        ctx.textBaseline = "alphabetic";
+
+        for (var c = 0; c < childNodes.length; c++) {
+          var node = childNodes[c];
+          if (node.nodeType !== 3) continue;
+          var rawText = (node.nodeValue || "").replace(/\s+/g, " ").trim();
+          if (!rawText) continue;
+
+          if (cs.textTransform === "uppercase") rawText = rawText.toUpperCase();
+          else if (cs.textTransform === "lowercase") rawText = rawText.toLowerCase();
+
+          var lineRects = null;
+          try {
+            textRange.selectNodeContents(node);
+            lineRects = textRange.getClientRects();
+          } catch (_e) {
+            lineRects = null;
+          }
+
+          if (!lineRects || lineRects.length === 0) continue;
+
+          if (lineRects.length === 1) {
+            var lr = lineRects[0];
+            if (lr.width >= 1 && lr.height >= 1) {
+              var tx = dx + lr.left * scale;
+              var ty = dy + (lr.top + lr.height * 0.78) * scale;
+              ctx.fillText(rawText, tx, ty);
+            }
+          } else {
+            // Texto multilínea: distribuir palabras según el ancho real de cada línea
+            var words = rawText.split(" ");
+            var wIdx = 0;
+            for (var rIdx = 0; rIdx < lineRects.length && wIdx < words.length; rIdx++) {
+              var lRect = lineRects[rIdx];
+              if (lRect.width < 1 || lRect.height < 1) continue;
+              var maxLineW = lRect.width * scale + 4;
+              var lineStr = words[wIdx++];
+              if (rIdx === lineRects.length - 1) {
+                while (wIdx < words.length) {
+                  lineStr += " " + words[wIdx++];
+                }
+              } else {
+                while (wIdx < words.length) {
+                  var candidate = lineStr + " " + words[wIdx];
+                  if (ctx.measureText(candidate).width <= maxLineW) {
+                    lineStr = candidate;
+                    wIdx++;
+                  } else {
+                    break;
+                  }
+                }
+              }
+              var ltx = dx + lRect.left * scale;
+              var lty = dy + (lRect.top + lRect.height * 0.78) * scale;
+              ctx.fillText(lineStr, ltx, lty);
+            }
+          }
+        }
+      }
+
+      ctx.restore();
+    }
+  }
+
   function captureAnnotatedSnapshot() {
     if (!state.active.length) {
       toast(t("toastNoDevices"));
@@ -2653,8 +3193,8 @@
 
       var dpr = 2;
       var stageRect = stage.getBoundingClientRect();
-      var headerH = 54;
-      var footerH = 44;
+      var headerH = 52;
+      var footerH = 40;
       var canvasW = Math.max(960, Math.round(stageRect.width));
       var canvasH = Math.max(540, Math.round(stageRect.height)) + headerH + footerH;
 
@@ -2664,12 +3204,12 @@
       var ctx = canvas.getContext("2d");
       ctx.scale(dpr, dpr);
 
-      // Fondo oscuro del tapete
-      ctx.fillStyle = "#14191F";
+      // Fondo claro neutro acorde con la interfaz (#E4E7E4)
+      ctx.fillStyle = "#E4E7E4";
       ctx.fillRect(0, 0, canvasW, canvasH);
 
-      // Cuadrícula sutil
-      ctx.strokeStyle = "rgba(255,255,255,0.035)";
+      // Cuadrícula sutil sobre el tapete
+      ctx.strokeStyle = "rgba(27, 31, 29, 0.045)";
       ctx.lineWidth = 1;
       for (var gx = 0; gx < canvasW; gx += 40) {
         ctx.beginPath(); ctx.moveTo(gx, headerH); ctx.lineTo(gx, canvasH - footerH); ctx.stroke();
@@ -2678,22 +3218,22 @@
         ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(canvasW, gy); ctx.stroke();
       }
 
-      // Barra superior del reporte visual
-      ctx.fillStyle = "#0F172A";
+      // Barra superior clara
+      ctx.fillStyle = "#FFFFFF";
       ctx.fillRect(0, 0, canvasW, headerH);
-      ctx.strokeStyle = "#38BDF8";
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#D0D5D0";
+      ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(0, headerH); ctx.lineTo(canvasW, headerH); ctx.stroke();
 
-      ctx.fillStyle = "#F8FAFC";
-      ctx.font = "bold 15px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillText("📸 DevTool Multi-Display · Snapshot Visual Anotado para IA", 16, 23);
+      ctx.fillStyle = "#1B1F1D";
+      ctx.font = "600 14px -apple-system, BlinkMacSystemFont, sans-serif";
+      ctx.fillText("DevTool Multi-Display — Captura de Pantallas", 16, 22);
 
-      ctx.fillStyle = "#94A3B8";
-      ctx.font = "500 12px ui-monospace, SFMono-Regular, Menlo, monospace";
-      ctx.fillText("URL: " + (state.url || "—") + "   |   Dispositivos: " + state.active.length + "   |   Auditoría: " + auditState.items.length + " avisos", 16, 42);
+      ctx.fillStyle = "#5A625D";
+      ctx.font = "500 11.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.fillText("URL: " + (state.url || "—") + "   |   Pantallas: " + state.active.length + "   |   Auditoría: " + auditState.items.length + " hallazgos", 16, 40);
 
-      // Dibujar cada dispositivo activo
+      // Dibujar cada dispositivo activo con su DOM en vivo (incluyendo modales, diálogos y overlays)
       state.active.forEach(function (id) {
         var e = els[id];
         var d = BY_ID[id];
@@ -2706,55 +3246,28 @@
         var col = deviceColor(id);
         var scale = dw / Math.max(1, d.width);
 
-        // Marco con el color único del dispositivo
+        // Marco con el color de contorno único del dispositivo
+        ctx.save();
+        ctx.shadowColor = "rgba(15, 23, 42, 0.12)";
+        ctx.shadowBlur = 12;
+        ctx.shadowOffsetY = 4;
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fillRect(dx - 2, dy - 2, dw + 4, dh + 4);
+        ctx.restore();
+
         ctx.save();
         ctx.strokeStyle = col;
-        ctx.lineWidth = 3;
-        ctx.fillStyle = "#0B0F13";
-        ctx.fillRect(dx - 3, dy - 3, dw + 6, dh + 6);
-        ctx.strokeRect(dx - 3, dy - 3, dw + 6, dh + 6);
+        ctx.lineWidth = 2.5;
+        ctx.strokeRect(dx - 2, dy - 2, dw + 4, dh + 4);
 
-        // Contenido de la pantalla (DOM Layout Snapshot)
+        // Contenido real de la pantalla (live DOM + modales/stacking contexts)
         ctx.beginPath();
         ctx.rect(dx, dy, dw, dh);
         ctx.clip();
 
-        var snap = snapByFrame[id];
-        var bgPageCol = (snap && (snap.bgPage || snap.bg) && (snap.bgPage || snap.bg) !== "rgba(0, 0, 0, 0)") ? (snap.bgPage || snap.bg) : "#FFFFFF";
-        ctx.fillStyle = bgPageCol;
-        ctx.fillRect(dx, dy, dw, dh);
+        paintLiveIframeDom(ctx, e.iframe, dx, dy, dw, dh, d.width, d.height, snapByFrame[id]);
 
-        if (snap && Array.isArray(snap.nodes)) {
-          snap.nodes.forEach(function (n) {
-            var nx = dx + n.x * scale;
-            var ny = dy + n.y * scale;
-            var nw = n.w * scale;
-            var nh = n.h * scale;
-            if (n.bg) {
-              ctx.fillStyle = n.bg;
-              ctx.fillRect(nx, ny, nw, nh);
-            }
-            if (n.tag === "img" || n.isImg) {
-              ctx.fillStyle = "rgba(148, 163, 184, 0.22)";
-              ctx.fillRect(nx, ny, nw, nh);
-            }
-            var borderCol = n.border || n.bCol;
-            if (borderCol) {
-              ctx.strokeStyle = borderCol;
-              ctx.lineWidth = 1;
-              ctx.strokeRect(nx, ny, nw, nh);
-            }
-            if (n.text) {
-              ctx.fillStyle = n.color || "#1E293B";
-              var fSize = Math.max(7, Math.min(22, Math.round(((n.fontSize || n.fSize || 13)) * scale)));
-              var fwNum = parseInt(n.fontWeight || n.fWeight || "400", 10);
-              ctx.font = (fwNum >= 600 ? "bold " : "") + fSize + "px -apple-system, sans-serif";
-              ctx.fillText(n.text.slice(0, 42), nx + 3, ny + Math.min(nh - 2, fSize + 3));
-            }
-          });
-        }
-
-        // Anotaciones de Auditoría Visual (en rojo/naranja) sobre la pantalla
+        // Anotaciones de Auditoría Visual sobre la pantalla (si existen hallazgos)
         var devIssues = auditState.items.filter(function (iss) { return iss.device_id === id && iss.box && iss.box.width; });
         devIssues.forEach(function (iss, iIdx) {
           var ix = dx + (iss.box.x || 0) * scale;
@@ -2762,14 +3275,14 @@
           var iw = Math.max(16, Math.min(dw - 4, iss.box.width * scale));
           var ih = Math.max(14, Math.min(dh - 4, iss.box.height * scale));
           var isErr = iss.severity === "error";
-          ctx.strokeStyle = isErr ? "#EF4444" : "#F59E0B";
-          ctx.lineWidth = 2;
-          ctx.fillStyle = isErr ? "rgba(239, 68, 68, 0.18)" : "rgba(245, 158, 11, 0.16)";
+          ctx.strokeStyle = isErr ? "#DC2626" : "#D97706";
+          ctx.lineWidth = 1.75;
+          ctx.fillStyle = isErr ? "rgba(220, 38, 38, 0.14)" : "rgba(217, 119, 6, 0.14)";
           ctx.fillRect(ix, iy, iw, ih);
           ctx.strokeRect(ix, iy, iw, ih);
 
-          var tagTxt = "!" + (iIdx + 1) + " " + iss.kind;
-          ctx.font = "bold 9.5px ui-monospace, monospace";
+          var tagTxt = "#" + (iIdx + 1) + " " + iss.kind;
+          ctx.font = "600 9.5px ui-monospace, monospace";
           var tw = ctx.measureText(tagTxt).width + 8;
           ctx.fillStyle = isErr ? "#DC2626" : "#D97706";
           ctx.fillRect(ix, Math.max(dy, iy - 14), tw, 14);
@@ -2782,28 +3295,32 @@
         // Etiqueta inferior del dispositivo
         ctx.fillStyle = col;
         ctx.beginPath();
-        ctx.arc(dx + 8, dy + dh + 15, 4.5, 0, Math.PI * 2);
+        ctx.arc(dx + 7, dy + dh + 15, 4, 0, Math.PI * 2);
         ctx.fill();
 
-        ctx.fillStyle = "#F1F5F9";
-        ctx.font = "bold 11.5px -apple-system, sans-serif";
-        ctx.fillText(d.name + "  (" + d.width + "×" + d.height + ")", dx + 18, dy + dh + 19);
+        ctx.fillStyle = "#1B1F1D";
+        ctx.font = "600 11.5px -apple-system, sans-serif";
+        ctx.fillText(d.name + "  (" + d.width + "×" + d.height + ")", dx + 16, dy + dh + 19);
       });
 
-      // Barra inferior con resumen de errores de Consola y HTTP
-      ctx.fillStyle = "#0F172A";
+      // Barra inferior clara con resumen de errores de Consola y HTTP
+      ctx.fillStyle = "#FFFFFF";
       ctx.fillRect(0, canvasH - footerH, canvasW, footerH);
+      ctx.strokeStyle = "#D0D5D0";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, canvasH - footerH); ctx.lineTo(canvasW, canvasH - footerH); ctx.stroke();
+
       var errCount = consoleState.items.filter(function (c) { return c.level === "error"; }).length;
       var httpErrCount = trafficState.items.filter(function (r) { return r.status >= 400; }).length;
       var inspText = lastInspectedElement
         ? ("Último elemento: " + lastInspectedElement.selector + " [" + lastInspectedElement.device_name + "]")
         : "Sin elemento inspeccionado";
-      ctx.fillStyle = "#E2E8F0";
-      ctx.font = "600 11.5px ui-monospace, monospace";
+      ctx.fillStyle = "#3E4540";
+      ctx.font = "500 11.5px ui-monospace, monospace";
       ctx.fillText(
-        "Consola Errores: " + errCount + "   |   HTTP 4xx/5xx: " + httpErrCount + "   |   " + inspText,
+        "Errores Consola: " + errCount + "   |   HTTP 4xx/5xx: " + httpErrCount + "   |   " + inspText,
         16,
-        canvasH - 17
+        canvasH - 15
       );
 
       canvas.toBlob(function (blob) {
