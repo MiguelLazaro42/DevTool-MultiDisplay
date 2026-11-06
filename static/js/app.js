@@ -678,18 +678,18 @@
     var availStackH = Math.max(180, H - best.rows.length * (BEZEL + CAPTION) - (best.rows.length - 1) * GAP_Y);
 
     function computeDeviceScale(d, row, ri) {
-      if (isStackedPortrait && row.length === 1 && (state.zoomMode === "fill" || state.zoomMode === "fit")) {
+      if (isStackedPortrait && row.length === 1) {
         var fitWScale = freeSingleW / d.width;
-        if (state.zoomMode === "fill" || state.stackMode === "stack") {
-          var hRatioFill = totalHAtFullW > 0 ? (availStackH / totalHAtFullW) : 1;
-          var fillFactor = Math.min(1.0, Math.max(0.95, hRatioFill));
-          return fitWScale * fillFactor;
-        } else {
-          // Modo Fit en monitor vertical: todas las pantallas tienen exactamente el mismo ancho visual
-          var hRatioFit = totalHAtFullW > 0 ? (availStackH / totalHAtFullW) : 1;
-          var fitFactor = Math.min(1.0, Math.max(0.82, hRatioFit));
-          return fitWScale * fitFactor;
+        var hRatio = totalHAtFullW > 0 ? (availStackH / totalHAtFullW) : 1;
+        var baseFactor = (state.zoomMode === "fill" || state.stackMode === "stack")
+          ? Math.min(1.0, Math.max(0.95, hRatio))
+          : Math.min(1.0, Math.max(0.82, hRatio));
+        var stackBase = fitWScale * baseFactor;
+        if (state.zoomMode === "fill" || state.zoomMode === "fit") {
+          return stackBase;
         }
+        var manualRatio = s / Math.max(0.05, best.s);
+        return stackBase * manualRatio;
       }
       return rowScales[ri] * relScales[d.id];
     }
@@ -715,9 +715,19 @@
     rack.style.width = Math.floor(areaW + PAD_X * 2) + "px";
     rack.style.height = Math.floor(areaH + PAD_TOP + PAD_BOTTOM) + "px";
 
+    var originX = PAD_X + (areaW - totalW) / 2;
+    var originY = PAD_TOP + (areaH - totalH) / 2;
+    state.baseScale = s;
+    state.layoutMetrics = {
+      originX: originX,
+      originY: originY,
+      totalW: totalW,
+      totalH: totalH
+    };
+
     updatePanCursor();
 
-    var y = PAD_TOP + (areaH - totalH) / 2;
+    var y = originY;
 
     best.rows.forEach(function (row, ri) {
       var rowW = rowWidths[ri];
@@ -804,36 +814,59 @@
     zoomFitBtn.title = t("zoomFitTitle") + " (" + MOD + " 0)";
   }
 
-  // Cambia el zoom manteniendo fijo un punto del tapete (el cursor, o el
-  // centro si no hay cursor). anchor = {x, y} relativo a la esquina del tapete.
+  // Cambia el zoom manteniendo exactamente fijo el punto del contenido bajo el cursor
+  // (o el centro de la ventana si no hay cursor). anchor = {x, y} relativo a la esquina del tapete.
   var zoomingTimer;
   function applyZoom(mode, anchor) {
-    var before = state.scale;
-    if (mode !== "fit" && mode !== "fill") mode = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, mode));
+    var beforeBase = state.baseScale || state.scale || 1;
+    var beforeMetrics = state.layoutMetrics
+      ? {
+          originX: state.layoutMetrics.originX,
+          originY: state.layoutMetrics.originY,
+          totalW: state.layoutMetrics.totalW,
+          totalH: state.layoutMetrics.totalH
+        }
+      : null;
+
+    if (mode !== "fit" && mode !== "fill") {
+      mode = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, mode));
+    }
     state.zoomMode = mode;
     store(STORE_ZOOM, mode);
 
     stage.classList.add("is-zooming");
     clearTimeout(zoomingTimer);
-    zoomingTimer = setTimeout(function () { stage.classList.remove("is-zooming"); }, 200);
+    zoomingTimer = setTimeout(function () { stage.classList.remove("is-zooming"); }, 180);
 
     var ax = anchor ? anchor.x : stage.clientWidth / 2;
     var ay = anchor ? anchor.y : stage.clientHeight / 2;
-    var cx = stage.scrollLeft + ax, cy = stage.scrollTop + ay;
+    var beforeScrollLeft = stage.scrollLeft;
+    var beforeScrollTop = stage.scrollTop;
 
     layout();
 
-    var ratio = state.scale / before;
-    stage.scrollLeft = cx * ratio - ax;
-    stage.scrollTop = cy * ratio - ay;
+    var afterMetrics = state.layoutMetrics;
+    if (beforeMetrics && afterMetrics && beforeMetrics.totalW > 1 && beforeMetrics.totalH > 1) {
+      var relX = (beforeScrollLeft + ax) - beforeMetrics.originX;
+      var relY = (beforeScrollTop + ay) - beforeMetrics.originY;
+      var ratioX = afterMetrics.totalW / beforeMetrics.totalW;
+      var ratioY = afterMetrics.totalH / beforeMetrics.totalH;
+      stage.scrollLeft = Math.max(0, Math.round(afterMetrics.originX + relX * ratioX - ax));
+      stage.scrollTop = Math.max(0, Math.round(afterMetrics.originY + relY * ratioY - ay));
+    } else {
+      var afterBase = state.baseScale || state.scale || 1;
+      var ratio = afterBase / beforeBase;
+      stage.scrollLeft = (beforeScrollLeft + ax) * ratio - ax;
+      stage.scrollTop = (beforeScrollTop + ay) * ratio - ay;
+    }
   }
 
-  function stepZoom(dir) {
-    var cur = state.scale, next;
+  function stepZoom(dir, anchor) {
+    var cur = state.baseScale || state.scale, next;
     // Salta al siguiente paso que se note (al menos 4 % de diferencia).
     if (dir > 0) next = ZOOM_STEPS.filter(function (z) { return z > cur * 1.04; })[0] || ZOOM_MAX;
     else next = ZOOM_STEPS.filter(function (z) { return z < cur / 1.04; }).pop() || ZOOM_MIN;
-    applyZoom(next);
+    applyZoom(next, anchor);
   }
 
   function fitZoom() {
@@ -863,29 +896,52 @@
   if (zoomFillBtn) zoomFillBtn.addEventListener("click", fillZoom);
   if (stackBtn) stackBtn.addEventListener("click", toggleStackMode);
 
-  // ⌘/Ctrl + y ⌘/Ctrl − hacen zoom en el visor en lugar de en Chrome.
+  // ⌘/Ctrl + , ⌘/Ctrl − , ⌘/Ctrl 0 (Fit) y ⌘/Ctrl 1 (100%) hacen zoom en el visor.
   function onZoomKey(ev) {
     if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return;
+    var tag = ev.target && ev.target.tagName ? ev.target.tagName.toLowerCase() : "";
+    if (tag === "input" || tag === "textarea") return;
     var k = ev.key;
     if (k === "+" || k === "=") stepZoom(1);
     else if (k === "-" || k === "_") stepZoom(-1);
     else if (k === "0") fitZoom();
+    else if (k === "1") applyZoom(1);
     else return;
     ev.preventDefault();
     ev.stopPropagation();
   }
 
-  // Pellizcar en el trackpad o Ctrl + rueda: Chrome los manda como "wheel"
-  // con ctrlKey. toStage convierte las coordenadas del evento al tapete.
+  function isZoomWheelEvent(ev) {
+    return !!(ev && (ev.ctrlKey || ev.metaKey || ev.altKey));
+  }
+
+  // Pellizcar en el trackpad (Mac / Windows Precision Touchpad) o Ctrl / ⌘ / Alt + rueda del mouse:
+  // Detecta si es un gesto continuo de trackpad (deltas pequeños/fraccionales) o un paso discreto de rueda de mouse.
+  function applyWheelZoomDelta(deltaY, deltaMode, anchorPoint) {
+    var base = state.baseScale || state.scale || 1;
+    var absDy = Math.abs(deltaY);
+    var isMouseWheelNotch = deltaMode === 1 || (absDy >= 40 && absDy % 1 === 0);
+    var sensitivity;
+    if (deltaMode === 1) {
+      sensitivity = 0.045;
+    } else if (isMouseWheelNotch) {
+      sensitivity = 0.0018;
+    } else {
+      // Trackpad pinch o scroll fino con modificador: respuesta fluida y directa
+      sensitivity = 0.0115;
+    }
+    var factor = Math.exp(-deltaY * sensitivity);
+    factor = Math.min(1.22, Math.max(1 / 1.22, factor));
+    applyZoom(base * factor, anchorPoint);
+  }
+
   function onZoomWheel(ev, toStage) {
-    if (!ev.ctrlKey) return;
+    if (!isZoomWheelEvent(ev)) return;
     ev.preventDefault();
+    ev.stopPropagation();
     var p = toStage(ev.clientX, ev.clientY);
-    // El trackpad manda pasos pequeños; la rueda del mouse, grandes. Se limita
-    // cada evento a ±20 % para que un clic de rueda no salte de golpe.
-    var factor = Math.exp(-ev.deltaY * (ev.deltaMode === 1 ? 0.05 : 0.01));
-    factor = Math.min(1.2, Math.max(1 / 1.2, factor));
-    applyZoom(state.scale * factor, p);
+    var dy = ev.deltaY !== 0 ? ev.deltaY : ev.deltaX;
+    applyWheelZoomDelta(dy, ev.deltaMode || 0, p);
   }
 
   function stagePoint(clientX, clientY) {
@@ -893,15 +949,44 @@
     return { x: clientX - r.left, y: clientY - r.top };
   }
 
+  // Soporte adicional para gestos nativos GestureEvent de Safari / WebKit en trackpad de Mac
+  var gestureStartScale = null;
+  function bindSafariGestureEvents(target, toStageFn) {
+    target.addEventListener("gesturestart", function (ev) {
+      ev.preventDefault();
+      gestureStartScale = state.baseScale || state.scale || 1;
+    }, { passive: false });
+    target.addEventListener("gesturechange", function (ev) {
+      if (gestureStartScale === null || typeof ev.scale !== "number") return;
+      ev.preventDefault();
+      var p = toStageFn(ev.clientX || (stage.clientWidth / 2), ev.clientY || (stage.clientHeight / 2));
+      applyZoom(gestureStartScale * ev.scale, p);
+    }, { passive: false });
+    target.addEventListener("gestureend", function () {
+      gestureStartScale = null;
+    }, { passive: false });
+  }
+  bindSafariGestureEvents(stage, stagePoint);
+
   document.addEventListener("keydown", onZoomKey, true);
-  // Rueda sobre el tapete: con Ctrl es zoom; sin Ctrl hace scroll en TODAS
-  // las pantallas a la vez. Sobre una pantalla, el evento lo recibe solo
-  // ese iframe, así que se desplaza únicamente esa.
+  // Rueda sobre el tapete: con Ctrl / ⌘ / Alt o pellizco de trackpad hace zoom;
+  // sin modificador hace scroll en TODAS las pantallas a la vez.
   stage.addEventListener("wheel", function (ev) {
-    if (ev.ctrlKey) { onZoomWheel(ev, stagePoint); return; }
+    if (isZoomWheelEvent(ev)) { onZoomWheel(ev, stagePoint); return; }
     ev.preventDefault();
     scrollAllScreens(ev);
   }, { passive: false });
+
+  // Doble clic sobre el fondo del tapete: alterna entre Fit y 100% (1:1) anclado al cursor
+  stage.addEventListener("dblclick", function (ev) {
+    if (ev.target.closest(".device, button, a, input")) return;
+    var p = stagePoint(ev.clientX, ev.clientY);
+    if (state.zoomMode === "fit") {
+      applyZoom(1, p);
+    } else {
+      fitZoom();
+    }
+  });
 
   function scrollAllScreens(ev) {
     var unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? stage.clientHeight : 1;
@@ -932,16 +1017,37 @@
     }
   }
 
-  // Para recorrer el tapete cuando el zoom no cabe: arrastrar el fondo.
+  // Para recorrer el tapete cuando el zoom no cabe: arrastrar el fondo, usar botón central del mouse o Espacio + arrastrar.
   var pan = null;
+  var spacePressed = false;
   function canPan() {
     return stage.scrollWidth > stage.clientWidth + 1 || stage.scrollHeight > stage.clientHeight + 1;
   }
-  function updatePanCursor() { stage.classList.toggle("can-pan", canPan()); }
+  function updatePanCursor() {
+    stage.classList.toggle("can-pan", canPan() || spacePressed);
+  }
+
+  window.addEventListener("keydown", function (ev) {
+    if (ev.code === "Space" && !spacePressed) {
+      var tag = ev.target && ev.target.tagName ? ev.target.tagName.toLowerCase() : "";
+      if (tag !== "input" && tag !== "textarea" && !ev.target.isContentEditable) {
+        spacePressed = true;
+        updatePanCursor();
+      }
+    }
+  });
+  window.addEventListener("keyup", function (ev) {
+    if (ev.code === "Space" && spacePressed) {
+      spacePressed = false;
+      updatePanCursor();
+    }
+  });
 
   stage.addEventListener("pointerdown", function (ev) {
-    if (ev.button !== 0 || !canPan()) return;
-    if (ev.target.closest(".device-screen, button, a, input")) return;
+    var isMiddleClick = ev.button === 1;
+    var isLeftPan = ev.button === 0 && (canPan() || spacePressed);
+    if (!isMiddleClick && !isLeftPan) return;
+    if (!isMiddleClick && !spacePressed && ev.target.closest(".device-screen, button, a, input")) return;
     pan = { id: ev.pointerId, x: ev.clientX, y: ev.clientY, left: stage.scrollLeft, top: stage.scrollTop };
     stage.setPointerCapture(ev.pointerId);
     stage.classList.add("is-panning");
@@ -960,7 +1066,15 @@
   stage.addEventListener("pointerup", endPan);
   stage.addEventListener("pointercancel", endPan);
   // Por si el pellizco cae fuera del tapete (en la barra de abajo).
-  window.addEventListener("wheel", function (ev) { if (ev.ctrlKey) ev.preventDefault(); }, { passive: false });
+  window.addEventListener("wheel", function (ev) { if (isZoomWheelEvent(ev)) ev.preventDefault(); }, { passive: false });
+
+  // Convierte coordenadas internas de un iframe al punto exacto en el tapete
+  function iframePointToStage(iframe, x, y) {
+    var r = iframe.getBoundingClientRect();
+    var scaleX = r.width / Math.max(1, iframe.offsetWidth || parseFloat(iframe.width) || 1);
+    var scaleY = r.height / Math.max(1, iframe.offsetHeight || parseFloat(iframe.height) || 1);
+    return stagePoint(r.left + x * scaleX, r.top + y * scaleY);
+  }
 
   // Las páginas cargadas son del mismo origen (pasan por el proxy), así que
   // podemos escuchar el teclado y el pellizco también dentro de cada pantalla.
@@ -978,10 +1092,12 @@
     }, true);
     w.addEventListener("wheel", function (ev) {
       onZoomWheel(ev, function (x, y) {
-        var r = iframe.getBoundingClientRect();
-        return stagePoint(r.left + x * state.scale, r.top + y * state.scale);
+        return iframePointToStage(iframe, x, y);
       });
     }, { passive: false, capture: true });
+    bindSafariGestureEvents(w, function (x, y) {
+      return iframePointToStage(iframe, x, y);
+    });
   }
 
   // ---------- Buscar ----------
@@ -1201,6 +1317,12 @@
       onInspectorPicked(d);
     } else if (d.type === "rv:exit_inspector") {
       if (state.inspector) toggleInspector(false);
+    } else if (d.type === "rv:iframe_zoom_wheel") {
+      var zItem = els[d.frame];
+      if (zItem && zItem.iframe) {
+        var zAnchor = iframePointToStage(zItem.iframe, d.clientX || 0, d.clientY || 0);
+        applyWheelZoomDelta(d.deltaY || 0, d.deltaMode || 0, zAnchor);
+      }
     } else if (d.type === "rv:sync_scroll") {
       if (!state.sync) return;
       var scrollPayload = {

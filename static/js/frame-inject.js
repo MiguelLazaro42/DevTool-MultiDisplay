@@ -135,6 +135,24 @@
     }
   }
 
+  // ---------- Gestos de Zoom desde dentro del iframe (Trackpad Pinch / Ctrl / ⌘ / Alt + Rueda) ----------
+  window.addEventListener("wheel", function (ev) {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      try {
+        parent.postMessage({
+          type: "rv:iframe_zoom_wheel",
+          frame: F,
+          clientX: ev.clientX,
+          clientY: ev.clientY,
+          deltaY: ev.deltaY !== 0 ? ev.deltaY : ev.deltaX,
+          deltaMode: ev.deltaMode || 0
+        }, ORIGIN);
+      } catch (_e) {}
+    }
+  }, { passive: false, capture: true });
+
   // ---------- Enlaces ----------
   // En fase de burbuja sobre window: si la página maneja el clic ella misma
   // (por ejemplo un router de una SPA), ya llamó a preventDefault y no tocamos nada.
