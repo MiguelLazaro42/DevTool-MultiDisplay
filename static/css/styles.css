@@ -160,6 +160,130 @@ body {
 .lang-switch button:hover { color: #fff; }
 .lang-switch button[aria-pressed="true"] { background: var(--steel); color: var(--ink); }
 
+/* Barra flotante de Pestañas Virtuales (Pestaña 1, Pestaña 2...) */
+.sim-tabs {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: calc(100% - 16px);
+  padding: 2.5px;
+  background: rgba(8, 24, 20, .72);
+  border: 1px solid rgba(255, 255, 255, .14);
+  backdrop-filter: blur(6px);
+  border-radius: 7px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.sim-tabs[hidden] { display: none; }
+.sim-tabs::-webkit-scrollbar { display: none; }
+
+.sim-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 23px;
+  padding: 0 7px 0 5px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mat-text);
+  font: 500 11.5px/1 var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 140ms ease, color 140ms ease;
+}
+.sim-tab:hover {
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+}
+.sim-tab.is-active {
+  background: var(--steel);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .22);
+}
+
+.sim-tab-num {
+  display: inline-grid;
+  place-items: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .14);
+  color: #fff;
+  font: 600 10.5px/1 var(--font-measure);
+}
+.sim-tab.is-active .sim-tab-num {
+  background: var(--ink);
+  color: var(--tape);
+}
+
+.sim-tab-title {
+  max-width: 135px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sim-tab-close {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  opacity: .65;
+  cursor: pointer;
+}
+.sim-tab-close:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, .14);
+}
+.sim-tab-close svg {
+  width: 9px;
+  height: 9px;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  fill: none;
+  stroke-linecap: round;
+}
+
+.sim-tab-add {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 23px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mat-text);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sim-tab-add:hover {
+  background: rgba(255, 255, 255, .12);
+  color: #fff;
+}
+.sim-tab-add svg {
+  width: 12px;
+  height: 12px;
+  stroke: currentColor;
+  stroke-width: 2.1;
+  fill: none;
+  stroke-linecap: round;
+}
+
 /* ---------- Dispositivo ---------- */
 
 .device {

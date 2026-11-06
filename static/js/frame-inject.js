@@ -153,22 +153,130 @@
     }
   }, { passive: false, capture: true });
 
-  // ---------- Enlaces ----------
-  // En fase de burbuja sobre window: si la página maneja el clic ella misma
-  // (por ejemplo un router de una SPA), ya llamó a preventDefault y no tocamos nada.
-  window.addEventListener("click", function (e) {
-    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    var a = e.target.closest && e.target.closest("a[href]");
+  // ---------- Enlaces y Nuevas Pestañas Virtuales ----------
+  function requestVirtualNewTab(targetUrl, labelText) {
+    if (!targetUrl || !proxiable(targetUrl)) return false;
+    if (typeof isReplayingSync !== "undefined" && isReplayingSync) return true;
+    try {
+      parent.postMessage({
+        type: "rv:open_new_tab",
+        frame: F,
+        url: targetUrl,
+        title: String(labelText || "").replace(/\s+/g, " ").trim().slice(0, 48)
+      }, ORIGIN);
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  function createVirtualPopupWindow(initialUrl) {
+    var currentHref = initialUrl || "about:blank";
+    var locProxy = {
+      assign: function (u) {
+        var r = abs(String(u || "")) || String(u || "");
+        currentHref = r;
+        requestVirtualNewTab(r, "");
+      },
+      replace: function (u) {
+        var r = abs(String(u || "")) || String(u || "");
+        currentHref = r;
+        requestVirtualNewTab(r, "");
+      },
+      reload: function () {},
+      toString: function () { return currentHref; }
+    };
+    try {
+      Object.defineProperty(locProxy, "href", {
+        get: function () { return currentHref; },
+        set: function (u) {
+          var r = abs(String(u || "")) || String(u || "");
+          currentHref = r;
+          requestVirtualNewTab(r, "");
+        },
+        configurable: true
+      });
+    } catch (_e) {
+      locProxy.href = currentHref;
+    }
+    var winProxy = {
+      closed: false,
+      opener: window,
+      focus: function () {},
+      blur: function () {},
+      close: function () { winProxy.closed = true; },
+      postMessage: function () {},
+      addEventListener: function () {},
+      removeEventListener: function () {}
+    };
+    try {
+      Object.defineProperty(winProxy, "location", {
+        get: function () { return locProxy; },
+        set: function (u) { locProxy.assign(u); },
+        configurable: true
+      });
+    } catch (_e) {
+      winProxy.location = locProxy;
+    }
+    return winProxy;
+  }
+
+  var nativeWindowOpen = window.open;
+  window.open = function (url, target, features) {
+    try {
+      var cleanTarget = String(target || "_blank").trim().toLowerCase();
+      var raw = url !== undefined && url !== null ? String(url).trim() : "";
+      if (!raw || raw === "about:blank") {
+        return createVirtualPopupWindow("");
+      }
+      var resolved = abs(raw) || raw;
+      if (proxiable(resolved)) {
+        if (cleanTarget === "_self" || cleanTarget === "_parent" || cleanTarget === "_top") {
+          location.href = via(resolved);
+          return window;
+        }
+        requestVirtualNewTab(resolved, "");
+        return createVirtualPopupWindow(resolved);
+      }
+    } catch (_e) {}
+    return nativeWindowOpen ? nativeWindowOpen.apply(window, arguments) : null;
+  };
+
+  function handleAnchorNavigation(e, forceNewTab) {
+    if (e.defaultPrevented) return;
+    var a = e.target && e.target.closest && e.target.closest("a[href]");
     if (!a || a.hasAttribute("download")) return;
-    if (a.target && a.target !== "_self") return;
     var rawHref = a.getAttribute("href") || "";
     if (!rawHref || rawHref.charAt(0) === "#" || /^javascript:/i.test(rawHref)) return;
     var href = abs(rawHref) || a.href;
     if (!proxiable(href)) return;
+
+    var rawTarget = (a.getAttribute("target") || a.target || "").trim().toLowerCase();
+    var isTargetNewTab = (rawTarget && rawTarget !== "_self" && rawTarget !== "_parent" && rawTarget !== "_top") ||
+      forceNewTab || e.metaKey || e.ctrlKey || e.button === 1;
+
+    if (isTargetNewTab) {
+      e.preventDefault();
+      var linkTitle = a.innerText || a.textContent || a.getAttribute("aria-label") || a.getAttribute("title") || "";
+      requestVirtualNewTab(href, linkTitle);
+      return;
+    }
+
+    if (e.button !== 0 || e.shiftKey || e.altKey) return;
     var here = (BASE_URL || document.baseURI).split("#")[0];
     if (href.split("#")[0] === here && href.indexOf("#") > -1) return; // ancla en la misma página
     e.preventDefault();
     location.href = via(href);
+  }
+
+  // En fase de burbuja sobre window: si la página maneja el clic ella misma
+  // (por ejemplo un router de una SPA), ya llamó a preventDefault y no tocamos nada.
+  window.addEventListener("click", function (e) {
+    handleAnchorNavigation(e, false);
+  });
+
+  window.addEventListener("auxclick", function (e) {
+    if (e.button === 1) handleAnchorNavigation(e, true);
   });
 
   // Interceptar navegaciones imperativas por JS (ej. window.location.href = '/' o '/login')
@@ -196,8 +304,7 @@
     var attr = function (name, fallback) {
       return (submitter && submitter.getAttribute("form" + name)) || form.getAttribute(name) || fallback;
     };
-    var target = attr("target", "");
-    if (target && target !== "_self") return null;
+    var target = (attr("target", "") || "").trim().toLowerCase();
     var rawAction = attr("action", BASE_URL || document.baseURI);
     var action = "";
     if (rawAction && rawAction.indexOf("/proxy?") > -1) {
@@ -210,7 +317,12 @@
       action = abs(rawAction) || (BASE_URL || document.baseURI);
     }
     if (!proxiable(action)) return null;
-    return { method: attr("method", "get").toLowerCase(), action: action };
+    return {
+      method: attr("method", "get").toLowerCase(),
+      action: action,
+      target: target,
+      isNewTab: !!(target && target !== "_self" && target !== "_parent" && target !== "_top")
+    };
   }
 
   function sendForm(form, submitter, info, skipSyncBroadcast) {
@@ -226,6 +338,10 @@
         merged.set(key, val);
       });
       u.search = merged.toString();
+      if (info.isNewTab) {
+        requestVirtualNewTab(u.href, "");
+        return true;
+      }
       if (!skipSyncBroadcast && typeof syncActive !== "undefined" && syncActive && !isReplayingSync) {
         try {
           parent.postMessage({
@@ -240,6 +356,11 @@
       }
       location.href = via(u.href);
       return true;
+    }
+    if (info.isNewTab) {
+      // Si un formulario POST intenta abrir _blank, abrir la ruta en pestaña virtual o redirigir al proxy dentro del frame
+      form.removeAttribute("target");
+      if (submitter && submitter.hasAttribute("formtarget")) submitter.removeAttribute("formtarget");
     }
     // POST (u otro): el navegador lo envía tal cual (archivos, enctype…),
     // pero a nuestro proxy en lugar de directo al sitio.
@@ -309,9 +430,18 @@
   }
 
   function notifyNavigated() {
-    try { parent.postMessage({ type: "rv:navigated", frame: F, url: getCurrentPageUrl() }, ORIGIN); } catch (_e) {}
+    try {
+      parent.postMessage({
+        type: "rv:navigated",
+        frame: F,
+        url: getCurrentPageUrl(),
+        title: (document.title || "").trim().slice(0, 64)
+      }, ORIGIN);
+    } catch (_e) {}
   }
   notifyNavigated();
+  window.addEventListener("DOMContentLoaded", notifyNavigated);
+  window.addEventListener("load", notifyNavigated);
   window.addEventListener("hashchange", notifyNavigated);
   window.addEventListener("popstate", notifyNavigated);
 
@@ -1553,6 +1683,10 @@
     setTimeout(reportTemplateContext, 200);
 
     if (!syncActive) return;
+
+    var aTarget = aEl ? (aEl.getAttribute("target") || aEl.target || "").trim().toLowerCase() : "";
+    var opensNewVirtualTab = !!(aEl && absHref && proxiable(absHref) && ((aTarget && aTarget !== "_self" && aTarget !== "_parent" && aTarget !== "_top") || e.metaKey || e.ctrlKey || e.button === 1));
+    if (opensNewVirtualTab) return;
 
     var modalClose = isModalCloseTrigger(mainEl);
     var backdropClick = !modalClose && isModalBackdropElement(target, cx, cy);

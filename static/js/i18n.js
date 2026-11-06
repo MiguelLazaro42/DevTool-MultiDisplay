@@ -124,7 +124,13 @@
       certBtn: ".p12",
       certHint: "Configure client certificate (.p12 / .pfx) for mTLS development sites",
       certActivated: "Client certificate (.p12) activated. Reloading screens...",
-      certRemoved: "Client certificate removed."
+      certRemoved: "Client certificate removed.",
+      simTabLabel: "Tab {num}",
+      simTabEmpty: "New tab",
+      simTabAddHint: "Open a new virtual tab across all simulated devices",
+      simTabCloseHint: "Close Tab {num}",
+      simTabSwitchHint: "Switch all devices to Tab {num} ({url})",
+      toastNewTabOpened: "Opened in Tab {num}: {title}"
     },
     es: {
       screens: "Pantallas",
@@ -245,7 +251,13 @@
       certBtn: ".p12",
       certHint: "Configurar certificado cliente (.p12 / .pfx) para autenticar los visualizadores en desarrollo",
       certActivated: "Certificado .p12 activado. Recargando pantallas...",
-      certRemoved: "Certificado .p12 desactivado."
+      certRemoved: "Certificado .p12 desactivado.",
+      simTabLabel: "Pestaña {num}",
+      simTabEmpty: "Nueva pestaña",
+      simTabAddHint: "Abrir una nueva pestaña virtual en todos los dispositivos simulados",
+      simTabCloseHint: "Cerrar Pestaña {num}",
+      simTabSwitchHint: "Cambiar todos los dispositivos a la Pestaña {num} ({url})",
+      toastNewTabOpened: "Abierto en Pestaña {num}: {title}"
     }
   };
 

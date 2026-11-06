@@ -10,7 +10,7 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=35">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=36">
 </head>
 
 <body>
@@ -23,6 +23,9 @@
       <p data-i18n="emptyTitle">No devices yet.</p>
       <p data-i18n-html="emptyHint">Use <strong>Add device</strong> to add one.</p>
     </div>
+
+    <!-- Barra flotante de Pestañas Virtuales (Pestaña 1, Pestaña 2...) -->
+    <div class="sim-tabs" id="sim-tabs-bar" role="tablist" aria-label="Pestañas simuladas" hidden></div>
 
     <div class="lang-switch" role="group" aria-label="Language" data-i18n-aria-label="language">
       <button type="button" data-lang="en" lang="en" aria-pressed="true" title="English">EN</button>
@@ -635,8 +638,8 @@
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
   <script id="workspace-data" type="application/json">{{ workspace|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=35"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=35"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=36"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=36"></script>
 </body>
 
 </html>
