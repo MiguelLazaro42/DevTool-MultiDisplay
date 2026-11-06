@@ -520,7 +520,7 @@
     root.appendChild(caption);
     rack.appendChild(root);
 
-    els[id] = { root: root, screen: screen, iframe: iframe, placeholder: placeholder, remove: remove, popout: popout, sizeEl: size };
+    els[id] = { root: root, body: body, bezel: body, screen: screen, iframe: iframe, placeholder: placeholder, remove: remove, popout: popout, sizeEl: size };
     translateDevice(id);
     requestAnimationFrame(function () {
       requestAnimationFrame(function () { root.classList.remove("is-entering"); });
@@ -3540,9 +3540,14 @@
     return resolved;
   }
 
+  var snapshotImageCache = {};
+
   function loadSafeImage(src, timeoutMs) {
+    if (!src) return Promise.resolve(null);
+    if (src.indexOf("data:") !== 0 && snapshotImageCache[src]) {
+      return Promise.resolve(snapshotImageCache[src]);
+    }
     return new Promise(function (resolve) {
-      if (!src) return resolve(null);
       var img = new Image();
       img.crossOrigin = "anonymous";
       var done = false;
@@ -3550,12 +3555,15 @@
         if (done) return;
         done = true;
         resolve(null);
-      }, timeoutMs || 1800);
+      }, timeoutMs || 1100);
       img.onload = function () {
         if (done) return;
         done = true;
         clearTimeout(timer);
         if (img.naturalWidth > 0 && canDrawImageSafely(img)) {
+          if (src.indexOf("data:") !== 0) {
+            snapshotImageCache[src] = img;
+          }
           resolve(img);
         } else {
           resolve(null);
@@ -3607,89 +3615,91 @@
   function prepareFrameAssetsForSnapshot(id) {
     return new Promise(function (resolve) {
       var assetCache = { bgByUrl: {}, imgByEl: new Map(), svgByEl: new Map() };
-      var e = els[id];
-      var d = BY_ID[id];
-      if (!e || !e.iframe || !d) return resolve(assetCache);
-      var doc = null;
-      var win = null;
       try {
-        doc = e.iframe.contentDocument;
-        win = e.iframe.contentWindow;
-      } catch (_e) {
-        doc = null;
-        win = null;
-      }
-      if (!doc || !win || !doc.body) return resolve(assetCache);
-
-      var vw = win.innerWidth || d.width;
-      var vh = win.innerHeight || d.height;
-      var baseHref = (doc.location && doc.location.href && doc.location.href !== "about:blank")
-        ? doc.location.href
-        : (state.frameUrls[id] || state.url || location.href);
-
-      var tasks = [];
-      var seenBgUrls = {};
-      var allNodes = doc.body.querySelectorAll("*");
-      var maxNodes = Math.min(allNodes.length, 2500);
-
-      function queueBgImage(cs) {
-        if (!cs) return;
-        var rawUrl = extractCssUrl(cs.backgroundImage);
-        if (!rawUrl || seenBgUrls[rawUrl]) return;
-        seenBgUrls[rawUrl] = true;
-        var proxied = toProxyAssetUrl(rawUrl, id, baseHref);
-        tasks.push(loadSafeImage(proxied, 1600).then(function (img) {
-          if (img) assetCache.bgByUrl[rawUrl] = img;
-        }));
-      }
-
-      queueBgImage(win.getComputedStyle(doc.documentElement));
-      queueBgImage(win.getComputedStyle(doc.body));
-
-      for (var i = 0; i < maxNodes; i++) {
-        var el = allNodes[i];
-        var rect = el.getBoundingClientRect();
-        if (rect.width < 1 || rect.height < 1) continue;
-        if (rect.bottom < -40 || rect.right < -40 || rect.top > vh + 40 || rect.left > vw + 40) continue;
-
-        var tag = (el.tagName || "").toLowerCase();
-        var cs = win.getComputedStyle(el);
-        if (!cs || cs.display === "none" || cs.visibility === "hidden") continue;
-
-        queueBgImage(cs);
-        queueBgImage(win.getComputedStyle(el, "::before"));
-        queueBgImage(win.getComputedStyle(el, "::after"));
-
-        if (tag === "img") {
-          (function (imgEl) {
-            if (imgEl.complete && imgEl.naturalWidth > 0 && canDrawImageSafely(imgEl)) {
-              assetCache.imgByEl.set(imgEl, imgEl);
-              return;
-            }
-            var rawSrc = imgEl.currentSrc || imgEl.getAttribute("src") || imgEl.getAttribute("data-src") || "";
-            if (!rawSrc) return;
-            var proxiedSrc = toProxyAssetUrl(rawSrc, id, baseHref);
-            tasks.push(loadSafeImage(proxiedSrc, 1600).then(function (loaded) {
-              if (loaded) assetCache.imgByEl.set(imgEl, loaded);
-            }));
-          })(el);
-        } else if (tag === "svg") {
-          (function (svgEl) {
-            var dataUrl = serializeSvgToDataUrl(svgEl, win);
-            if (!dataUrl) return;
-            tasks.push(loadSafeImage(dataUrl, 900).then(function (loaded) {
-              if (loaded) assetCache.svgByEl.set(svgEl, loaded);
-            }));
-          })(el);
+        var e = els[id];
+        var d = BY_ID[id];
+        if (!e || !e.iframe || !d) return resolve(assetCache);
+        var doc = null;
+        var win = null;
+        try {
+          doc = e.iframe.contentDocument;
+          win = e.iframe.contentWindow;
+        } catch (_e) {
+          doc = null;
+          win = null;
         }
-      }
+        if (!doc || !win || !doc.body) return resolve(assetCache);
 
-      if (!tasks.length) return resolve(assetCache);
-      Promise.all(tasks).then(function () {
+        var vw = win.innerWidth || d.width;
+        var vh = win.innerHeight || d.height;
+        var baseHref = (doc.location && doc.location.href && doc.location.href !== "about:blank")
+          ? doc.location.href
+          : (state.frameUrls[id] || state.url || location.href);
+
+        var tasks = [];
+        var seenBgUrls = {};
+        var allNodes = doc.body.querySelectorAll("*");
+        var maxNodes = Math.min(allNodes.length, 2200);
+
+        function queueBgImage(cs) {
+          if (!cs) return;
+          var rawUrl = extractCssUrl(cs.backgroundImage);
+          if (!rawUrl || seenBgUrls[rawUrl]) return;
+          seenBgUrls[rawUrl] = true;
+          var proxied = toProxyAssetUrl(rawUrl, id, baseHref);
+          tasks.push(loadSafeImage(proxied, 1100).then(function (img) {
+            if (img) assetCache.bgByUrl[rawUrl] = img;
+          }));
+        }
+
+        queueBgImage(win.getComputedStyle(doc.documentElement));
+        queueBgImage(win.getComputedStyle(doc.body));
+
+        for (var i = 0; i < maxNodes; i++) {
+          var el = allNodes[i];
+          var rect = el.getBoundingClientRect();
+          if (rect.width < 1 || rect.height < 1) continue;
+          if (rect.bottom < 0 || rect.right < 0 || rect.top > vh || rect.left > vw) continue;
+
+          var tag = (el.tagName || "").toLowerCase();
+          var cs = win.getComputedStyle(el);
+          if (!cs || cs.display === "none" || cs.visibility === "hidden") continue;
+
+          queueBgImage(cs);
+
+          if (tag === "img") {
+            (function (imgEl) {
+              if (imgEl.complete && imgEl.naturalWidth > 0 && canDrawImageSafely(imgEl)) {
+                assetCache.imgByEl.set(imgEl, imgEl);
+                return;
+              }
+              var rawSrc = imgEl.currentSrc || imgEl.getAttribute("src") || imgEl.getAttribute("data-src") || "";
+              if (!rawSrc) return;
+              var proxiedSrc = toProxyAssetUrl(rawSrc, id, baseHref);
+              tasks.push(loadSafeImage(proxiedSrc, 1100).then(function (loaded) {
+                if (loaded) assetCache.imgByEl.set(imgEl, loaded);
+              }));
+            })(el);
+          } else if (tag === "svg") {
+            (function (svgEl) {
+              var dataUrl = serializeSvgToDataUrl(svgEl, win);
+              if (!dataUrl) return;
+              tasks.push(loadSafeImage(dataUrl, 600).then(function (loaded) {
+                if (loaded) assetCache.svgByEl.set(svgEl, loaded);
+              }));
+            })(el);
+          }
+        }
+
+        if (!tasks.length) return resolve(assetCache);
+        Promise.all(tasks).then(function () {
+          resolve(assetCache);
+        }).catch(function () {
+          resolve(assetCache);
+        });
+      } catch (_err) {
         resolve(assetCache);
-      }).catch(function () {
-        resolve(assetCache);
-      });
+      }
     });
   }
 
@@ -4315,8 +4325,9 @@
   function paintDeviceFrameOnMat(ctx, id, stageRect, offsetX, offsetY, snapByFrame, assetsByFrame) {
     var e = els[id];
     var d = BY_ID[id];
-    if (!e || !d) return;
-    var bezelRect = e.bezel.getBoundingClientRect();
+    if (!e || !d || !e.screen) return;
+    var bezelEl = e.body || e.bezel || e.screen.parentElement || e.screen;
+    var bezelRect = bezelEl.getBoundingClientRect();
     var screenRect = e.screen.getBoundingClientRect();
 
     var bx = bezelRect.left - stageRect.left + offsetX;
@@ -4331,10 +4342,10 @@
     var col = deviceColor(id);
     var scale = dw / Math.max(1, d.width);
 
-    var bezelCs = window.getComputedStyle(e.bezel);
+    var bezelCs = window.getComputedStyle(bezelEl);
     var screenCs = window.getComputedStyle(e.screen);
-    var bezelRadius = parseCssRadius(bezelCs.borderTopLeftRadius || bezelCs.borderRadius || "16px", bw, bh);
-    var screenRadius = parseCssRadius(screenCs.borderTopLeftRadius || screenCs.borderRadius || "8px", dw, dh);
+    var bezelRadius = parseCssRadius((bezelCs && (bezelCs.borderTopLeftRadius || bezelCs.borderRadius)) || "16px", bw, bh);
+    var screenRadius = parseCssRadius((screenCs && (screenCs.borderTopLeftRadius || screenCs.borderRadius)) || "8px", dw, dh);
 
     // 1. Bezel físico oscuro del dispositivo + borde del color identificador tal como se ve en pantalla
     ctx.save();
@@ -4358,10 +4369,15 @@
     traceRoundRect(ctx, dx, dy, dw, dh, screenRadius);
     ctx.clip();
 
-    paintLiveIframeDom(ctx, e.iframe, dx, dy, dw, dh, d.width, d.height, snapByFrame[id], assetsByFrame[id]);
+    try {
+      paintLiveIframeDom(ctx, e.iframe, dx, dy, dw, dh, d.width, d.height, snapByFrame[id], assetsByFrame[id]);
+    } catch (_err) {
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(dx, dy, dw, dh);
+    }
 
     // Anotaciones de Auditoría Visual (solo si el usuario activó el resaltado de auditoría)
-    if (auditState.highlight) {
+    if (auditState.highlightOnScreens) {
       var devIssues = auditState.items.filter(function (iss) { return iss.device_id === id && iss.box && iss.box.width; });
       devIssues.forEach(function (iss, iIdx) {
         var ix = dx + (iss.box.x || 0) * scale;
@@ -4445,31 +4461,42 @@
         height: h,
         dataUrl: c.toDataURL("image/png")
       };
+    }).catch(function () {
+      return null;
     });
   }
 
   function collectRemoteWindowSnapshots(timeoutMs) {
     return new Promise(function (resolve) {
       if (!syncChannel) return resolve([]);
+      var expectedCount = Object.keys(openSecondaryTabs).length || (windowSlot === "secondary" ? 1 : 0);
       var reqId = "snap-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7);
       var collected = [];
-      var waitMs = timeoutMs || 1400;
+      var done = false;
+      var waitMs = expectedCount > 0 ? (timeoutMs || 1100) : 90;
+
+      function finish() {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        syncChannel.removeEventListener("message", onMsg);
+        resolve(collected);
+      }
 
       function onMsg(ev) {
         var msg = ev.data;
         if (!msg || msg.tabId === TAB_ID) return;
         if (msg.type === "bc:window_snapshot_response" && msg.requestId === reqId && msg.dataUrl) {
           collected.push(msg);
+          if (expectedCount > 0 && collected.length >= expectedCount) {
+            finish();
+          }
         }
       }
 
       syncChannel.addEventListener("message", onMsg);
       postCrossTab({ type: "bc:request_window_snapshot", requestId: reqId });
-
-      setTimeout(function () {
-        syncChannel.removeEventListener("message", onMsg);
-        resolve(collected);
-      }, waitMs);
+      var timer = setTimeout(finish, waitMs);
     });
   }
 
@@ -4479,8 +4506,10 @@
       return;
     }
 
+    toast(I18N.getLang() === "es" ? "Generando captura…" : "Generating snapshot…");
+
     var hasOtherWindows = Object.keys(openSecondaryTabs).length > 0 || windowSlot === "secondary";
-    var remoteWaitMs = hasOtherWindows ? 1300 : 380;
+    var remoteWaitMs = hasOtherWindows ? 1100 : 90;
 
     Promise.all([
       Promise.all(state.active.map(requestDomSnapshotFromFrame)),
@@ -4501,7 +4530,7 @@
       });
 
       return Promise.all(remoteSnaps.map(function (rs) {
-        return loadSafeImage(rs.dataUrl, 1200).then(function (img) {
+        return loadSafeImage(rs.dataUrl, 1000).then(function (img) {
           return img ? { meta: rs, img: img } : null;
         });
       })).then(function (loadedRemotes) {
@@ -4641,6 +4670,9 @@
           }
         }, "image/png");
       });
+    }).catch(function (err) {
+      console.error("Snapshot error:", err);
+      toast("Error al generar la captura");
     });
   }
 
