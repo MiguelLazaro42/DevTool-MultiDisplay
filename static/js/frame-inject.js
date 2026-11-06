@@ -199,8 +199,16 @@
     var target = attr("target", "");
     if (target && target !== "_self") return null;
     var rawAction = attr("action", BASE_URL || document.baseURI);
-    if (rawAction && rawAction.indexOf("/proxy?") > -1) return null;
-    var action = abs(rawAction) || (BASE_URL || document.baseURI);
+    var action = "";
+    if (rawAction && rawAction.indexOf("/proxy?") > -1) {
+      try {
+        var pu = new URL(rawAction, ORIGIN);
+        action = pu.searchParams.get("url") || "";
+      } catch (_e) {}
+    }
+    if (!action) {
+      action = abs(rawAction) || (BASE_URL || document.baseURI);
+    }
     if (!proxiable(action)) return null;
     return { method: attr("method", "get").toLowerCase(), action: action };
   }
@@ -212,7 +220,12 @@
       var data;
       try { data = new FormData(form, submitter || undefined); } catch (_e) { data = new FormData(form); }
       var u = new URL(info.action);
-      u.search = new URLSearchParams(data).toString();
+      var merged = new URLSearchParams(u.search);
+      var formParams = new URLSearchParams(data);
+      formParams.forEach(function (val, key) {
+        merged.set(key, val);
+      });
+      u.search = merged.toString();
       location.href = via(u.href);
       return true;
     }

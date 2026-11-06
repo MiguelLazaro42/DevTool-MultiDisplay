@@ -503,11 +503,11 @@ META_CSP_RE = re.compile(
 HEAD_OPEN_RE = re.compile(r"<head(\s[^>]*)?>", re.I)
 
 ASSET_TAG_RE = re.compile(
-    r"<(?:script|link|img|source|video|audio|iframe|embed|object|form)\b[^>]*>",
+    r"<(?:script|link|img|source|video|audio|iframe|embed|object)\b[^>]*>",
     re.I,
 )
 SRC_HREF_ATTR_RE = re.compile(
-    r"(\b(?:src|href|poster|data-src|action)\s*=\s*)([\"'])([^\"']+)\2",
+    r"(\b(?:src|href|poster|data-src)\s*=\s*)([\"'])([^\"']+)\2",
     re.I,
 )
 SRCSET_ATTR_RE = re.compile(
@@ -953,8 +953,29 @@ def _execute_proxy(url, frame_id, device):
 @app.route("/proxy", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 def proxy():
     url = (request.args.get("url") or "").strip()
-    frame_id = re.sub(r"[^A-Za-z0-9_-]", "", request.args.get("frame", ""))[:64] or "default"
-    device = DEVICES_BY_ID.get(request.args.get("device", ""))
+    raw_frame = request.args.get("frame", "")
+    raw_device = request.args.get("device", "")
+
+    if not url:
+        ctx = _resolve_iframe_relative_context()
+        if ctx:
+            base_url, ctx_frame, ctx_device = ctx
+            raw_frame = raw_frame or ctx_frame
+            raw_device = raw_device or (ctx_device["id"] if ctx_device else "")
+            extra_pairs = [
+                (k, v)
+                for k, v in request.args.items(multi=True)
+                if k not in ("url", "frame", "device", "lang", "_t")
+            ]
+            if extra_pairs:
+                from urllib.parse import urlencode
+                sep = "&" if "?" in base_url else "?"
+                url = base_url + sep + urlencode(extra_pairs)
+            else:
+                url = base_url
+
+    frame_id = re.sub(r"[^A-Za-z0-9_-]", "", raw_frame)[:64] or "default"
+    device = DEVICES_BY_ID.get(raw_device) or DEVICES_BY_ID.get(frame_id) or DEVICES[0]
     return _execute_proxy(url, frame_id, device)
 
 

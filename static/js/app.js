@@ -3553,7 +3553,8 @@
       return resolved;
     }
     if (/^https?:\/\//i.test(resolved)) {
-      return "/proxy?url=" + encodeURIComponent(resolved) + "&frame=" + encodeURIComponent(frameId || "");
+      var devId = frameId || "iphone-15-pro";
+      return "/proxy?frame=" + encodeURIComponent(devId) + "&device=" + encodeURIComponent(devId) + "&url=" + encodeURIComponent(resolved);
     }
     return resolved;
   }
