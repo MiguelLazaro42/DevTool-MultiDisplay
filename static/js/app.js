@@ -1,6 +1,11 @@
 (function () {
   "use strict";
 
+  // Guardia anti-recursión: nunca inicializar el visor dentro de un iframe hijo.
+  if (window.self !== window.top) {
+    return;
+  }
+
   // ---------- Datos ----------
   var CATALOG = JSON.parse(document.getElementById("devices-data").textContent);
   var DEFAULTS = JSON.parse(document.getElementById("defaults-data").textContent);

@@ -153,6 +153,26 @@
     location.href = via(href);
   });
 
+  // Interceptar navegaciones imperativas por JS (ej. window.location.href = '/' o '/login')
+  if (typeof window.navigation !== "undefined" && typeof window.navigation.addEventListener === "function") {
+    window.navigation.addEventListener("navigate", function (e) {
+      try {
+        if (!e || e.hashChange || e.downloadRequest !== null || !e.destination || !e.destination.url) return;
+        var dest = new URL(e.destination.url);
+        if (dest.origin === ORIGIN && dest.pathname !== "/proxy") {
+          var resolved = abs(dest.pathname + dest.search + dest.hash);
+          if (proxiable(resolved) && e.cancelable !== false) {
+            e.preventDefault();
+            location.href = via(resolved);
+          }
+        } else if (dest.origin !== ORIGIN && proxiable(dest.href) && e.cancelable !== false) {
+          e.preventDefault();
+          location.href = via(dest.href);
+        }
+      } catch (_e) {}
+    });
+  }
+
   // ---------- Formularios ----------
   function formInfo(form, submitter) {
     var attr = function (name, fallback) {

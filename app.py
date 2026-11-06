@@ -24,7 +24,7 @@ import threading
 import time
 import warnings
 import webbrowser
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 # El Python que trae macOS usa LibreSSL y urllib3 avisa al arrancar; no
 # afecta al visor, así que no mostramos ese aviso a los usuarios.
@@ -32,7 +32,7 @@ warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
 import requests  # noqa: E402
 import urllib3  # noqa: E402
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, redirect, render_template, request
 from flask import cli as flask_cli
 
 from devices import DEFAULT_DEVICE_IDS, DEVICES, DEVICES_BY_ID
@@ -459,13 +459,24 @@ _last_proxied_site = {"base_url": "", "frame_id": "default", "device_id": "iphon
 def _should_proxy_asset_host(base_host, target_host):
     if not target_host:
         return False
+    bh = (base_host or "").split(":")[0].lower().strip(".")
     th = target_host.split(":")[0].lower().strip(".")
     if th in ("127.0.0.1", "localhost"):
         return False
     for cdn in PUBLIC_CDN_HOSTS:
         if th == cdn or th.endswith("." + cdn):
             return False
-    return True
+    if not bh:
+        return True
+    if bh == th or th.endswith("." + bh) or bh.endswith("." + th):
+        return True
+    bp = bh.split(".")
+    tp = th.split(".")
+    if len(bp) >= 2 and len(tp) >= 2 and bp[-2:] == tp[-2:]:
+        return True
+    if th.endswith("sitai.cloud") or th.endswith("conocecarmen.com"):
+        return True
+    return False
 
 
 def _build_proxy_asset_url(abs_url, frame_id, device_id):
@@ -643,8 +654,70 @@ def error_page(key, url, **fmt):
     return Response(page, status=502, mimetype="text/html")
 
 
+def _resolve_iframe_relative_context():
+    ref = request.headers.get("Referer", "")
+    frame_id = ""
+    device_id = ""
+    base_url = ""
+
+    if "/proxy" in ref:
+        try:
+            ref_parsed = urlparse(ref)
+            qs = parse_qs(ref_parsed.query)
+            frame_id = (qs.get("frame") or [""])[0]
+            device_id = (qs.get("device") or [""])[0]
+            base_url = (qs.get("url") or [""])[0]
+        except Exception:
+            pass
+
+    with _site_context_lock:
+        if not base_url and frame_id and frame_id in _site_by_frame:
+            base_url = _site_by_frame[frame_id]["base_url"]
+            device_id = device_id or _site_by_frame[frame_id]["device_id"]
+        if not base_url and _last_proxied_site["base_url"]:
+            base_url = _last_proxied_site["base_url"]
+            frame_id = frame_id or _last_proxied_site["frame_id"]
+            device_id = device_id or _last_proxied_site["device_id"]
+
+    if not base_url:
+        return None
+
+    frame_id = re.sub(r"[^A-Za-z0-9_-]", "", frame_id)[:64] or "default"
+    device = DEVICES_BY_ID.get(device_id) or DEVICES_BY_ID.get(frame_id) or DEVICES[0]
+    return base_url, frame_id, device
+
+
+def _handle_iframe_relative_request(req_path):
+    ctx = _resolve_iframe_relative_context()
+    if not ctx:
+        return None
+    base_url, frame_id, device = ctx
+    parsed_base = urlparse(base_url)
+    site_root = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    qs_str = ("?" + request.query_string.decode("utf-8", errors="ignore")) if request.query_string else ""
+    target_url = urljoin(site_root, req_path) + qs_str
+
+    sec_dest = (request.headers.get("Sec-Fetch-Dest") or "").lower()
+    sec_mode = (request.headers.get("Sec-Fetch-Mode") or "").lower()
+    if request.method == "GET" and (
+        req_path == "/"
+        or sec_dest in ("iframe", "frame", "document")
+        or sec_mode == "navigate"
+    ):
+        proxy_href = f"/proxy?frame={quote(frame_id, safe='')}&device={quote(device['id'], safe='')}&url={quote(target_url, safe='')}"
+        return redirect(proxy_href, code=302)
+
+    return _execute_proxy(target_url, frame_id, device)
+
+
 @app.route("/")
 def index():
+    sec_dest = (request.headers.get("Sec-Fetch-Dest") or "").lower()
+    ref = request.headers.get("Referer") or ""
+    if sec_dest in ("iframe", "frame") or "/proxy" in ref:
+        proxied_resp = _handle_iframe_relative_request("/")
+        if proxied_resp is not None:
+            return proxied_resp
     return render_template(
         "index.html", devices=DEVICES, default_device_ids=DEFAULT_DEVICE_IDS
     )
@@ -789,49 +862,18 @@ def proxy():
 
 
 @app.errorhandler(404)
-def catch_all_relative_proxy( _err):
+def catch_all_relative_proxy(_err):
     """Si una página dentro del iframe pide una ruta relativa directa al visor
-    (p. ej. /assets/chunk.js, /api/datos, /img/bg.png) cuando no hay <base href>,
-    la redirige transparentemente por _execute_proxy usando el certificado .p12."""
+    (p. ej. /login, /assets/chunk.js, /cdn/...) cuando no hay <base href>,
+    la redirige o enruta transparentemente por _execute_proxy."""
     req_path = request.path or "/"
     if req_path == "/favicon.ico":
         return Response(b"", status=204, mimetype="image/x-icon")
 
-    ref = request.headers.get("Referer", "")
-    frame_id = ""
-    device_id = ""
-    base_url = ""
-
-    if "/proxy" in ref:
-        try:
-            from urllib.parse import parse_qs
-            ref_parsed = urlparse(ref)
-            qs = parse_qs(ref_parsed.query)
-            frame_id = (qs.get("frame") or [""])[0]
-            device_id = (qs.get("device") or [""])[0]
-            base_url = (qs.get("url") or [""])[0]
-        except Exception:
-            pass
-
-    with _site_context_lock:
-        if not base_url and frame_id and frame_id in _site_by_frame:
-            base_url = _site_by_frame[frame_id]["base_url"]
-            device_id = device_id or _site_by_frame[frame_id]["device_id"]
-        if not base_url and _last_proxied_site["base_url"]:
-            base_url = _last_proxied_site["base_url"]
-            frame_id = frame_id or _last_proxied_site["frame_id"]
-            device_id = device_id or _last_proxied_site["device_id"]
-
-    if not base_url:
-        return Response("Not Found", status=404)
-
-    frame_id = re.sub(r"[^A-Za-z0-9_-]", "", frame_id)[:64] or "default"
-    device = DEVICES_BY_ID.get(device_id) or DEVICES_BY_ID.get(frame_id) or DEVICES[0]
-    parsed_base = urlparse(base_url)
-    site_root = f"{parsed_base.scheme}://{parsed_base.netloc}"
-    qs_str = ("?" + request.query_string.decode("utf-8", errors="ignore")) if request.query_string else ""
-    target_url = urljoin(site_root, req_path) + qs_str
-    return _execute_proxy(target_url, frame_id, device)
+    proxied_resp = _handle_iframe_relative_request(req_path)
+    if proxied_resp is not None:
+        return proxied_resp
+    return Response("Not Found", status=404)
 
 
 @app.route("/api/reset", methods=["POST"])
