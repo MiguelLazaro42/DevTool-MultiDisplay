@@ -1348,22 +1348,40 @@
       })
       .then(function () {
         clearSiteCacheAndStorage();
+        snapshotImageCache = {};
         trafficState.items = [];
-        trafficState.lastId = 0;
+        trafficState.lastSeq = 0;
+        trafficState.selectedId = null;
         consoleState.items = [];
-        consoleState.lastId = 0;
+        consoleState.lastSeq = 0;
+        consoleState.selectedId = null;
         auditState.items = [];
+        auditState.selectedIdx = -1;
         flowState.items = [];
-        flowState.lastId = 0;
+        flowState.lastSeq = 0;
+        flowState.selectedId = null;
+        storageState.serverCookies = [];
+        storageState.byDevice = {};
         storageState.rows = [];
+        storageState.selectedIdx = -1;
         templatesByDevice = {};
         inspectedByTier = { mobile: null, desktop: null };
         inspectedByDevice = {};
         lastInspectedElement = null;
-        if (trafficCountBadge) trafficCountBadge.textContent = "0";
-        if (consoleCountBadge) { consoleCountBadge.textContent = "0"; consoleCountBadge.classList.remove("has-errors"); }
-        if (auditCountBadge) { auditCountBadge.textContent = "0"; auditCountBadge.classList.remove("has-errors"); }
-        if (flowCountBadge) flowCountBadge.textContent = "0";
+        if (trafficCountEl) trafficCountEl.textContent = "0";
+        if (flowCountEl) flowCountEl.textContent = "0";
+        updateConsoleBadge();
+        updateAuditBadge();
+        renderTrafficTable();
+        renderTrafficDetail();
+        renderConsoleTable();
+        renderConsoleDetail();
+        renderAuditTable();
+        renderAuditDetail();
+        renderFlowTable();
+        renderFlowDetail();
+        renderStorageTable();
+        renderStorageDetail();
         if (!state.url) {
           toast(t("toastClearedNoUrl"));
           return;
