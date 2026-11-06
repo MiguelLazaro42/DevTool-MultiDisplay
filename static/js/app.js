@@ -1628,6 +1628,28 @@
         }
         return;
       }
+      if (msg.type === "bc:request_window_snapshot" && msg.requestId) {
+        if (state.active.length && typeof renderLocalWindowSnapshotDataUrl === "function") {
+          renderLocalWindowSnapshotDataUrl().then(function (snapPayload) {
+            if (!snapPayload) return;
+            postCrossTab({
+              type: "bc:window_snapshot_response",
+              requestId: msg.requestId,
+              windowSlot: windowSlot,
+              windowTitle: windowSlot === "secondary" ? "2da Pantalla / Monitor Vertical" : "Pantalla Principal",
+              devices: state.active.map(function (id) {
+                var d = BY_ID[id];
+                return d ? (d.name + " (" + d.width + "×" + d.height + ")") : id;
+              }),
+              deviceCount: state.active.length,
+              width: snapPayload.width,
+              height: snapPayload.height,
+              dataUrl: snapPayload.dataUrl
+            });
+          }).catch(function () {});
+        }
+        return;
+      }
       if (msg.type === "bc:traffic_ping") {
         fetchTraffic();
         return;
@@ -3478,26 +3500,265 @@
     return [matches[0], matches[matches.length - 1]];
   }
 
-  var taintTestCanvas = null;
-  var taintTestCtx = null;
   function canDrawImageSafely(imgEl) {
     try {
-      if (!taintTestCanvas) {
-        taintTestCanvas = document.createElement("canvas");
-        taintTestCanvas.width = 2;
-        taintTestCanvas.height = 2;
-        taintTestCtx = taintTestCanvas.getContext("2d");
-      }
-      taintTestCtx.clearRect(0, 0, 2, 2);
-      taintTestCtx.drawImage(imgEl, 0, 0, 1, 1);
-      taintTestCtx.getImageData(0, 0, 1, 1);
+      // Crear un canvas de prueba nuevo cada vez: si un canvas se contamina (tainted)
+      // con una imagen cross-origin una sola vez, getImageData fallaría para siempre.
+      var c = document.createElement("canvas");
+      c.width = 1;
+      c.height = 1;
+      var cctx = c.getContext("2d");
+      cctx.drawImage(imgEl, 0, 0, 1, 1);
+      cctx.getImageData(0, 0, 1, 1);
       return true;
     } catch (_e) {
       return false;
     }
   }
 
-  function paintLiveIframeDom(ctx, iframe, dx, dy, dw, dh, dWidth, dHeight, fallbackSnap) {
+  function extractCssUrl(bgImage) {
+    if (!bgImage || bgImage === "none") return "";
+    var m = bgImage.match(/url\(\s*['"]?([^'")]+)['"]?\s*\)/i);
+    return (m && m[1]) ? m[1].trim() : "";
+  }
+
+  function toProxyAssetUrl(rawUrl, frameId, baseHref) {
+    if (!rawUrl) return "";
+    if (rawUrl.indexOf("data:") === 0 || rawUrl.indexOf("blob:") === 0) return rawUrl;
+    var resolved = rawUrl;
+    try {
+      resolved = new URL(rawUrl, baseHref || state.url || location.href).href;
+    } catch (_e) {
+      resolved = rawUrl;
+    }
+    if (resolved.indexOf(location.origin + "/") === 0) {
+      return resolved;
+    }
+    if (/^https?:\/\//i.test(resolved)) {
+      return "/proxy?url=" + encodeURIComponent(resolved) + "&frame=" + encodeURIComponent(frameId || "");
+    }
+    return resolved;
+  }
+
+  function loadSafeImage(src, timeoutMs) {
+    return new Promise(function (resolve) {
+      if (!src) return resolve(null);
+      var img = new Image();
+      img.crossOrigin = "anonymous";
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        resolve(null);
+      }, timeoutMs || 1800);
+      img.onload = function () {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (img.naturalWidth > 0 && canDrawImageSafely(img)) {
+          resolve(img);
+        } else {
+          resolve(null);
+        }
+      };
+      img.onerror = function () {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(null);
+      };
+      img.src = src;
+    });
+  }
+
+  function serializeSvgToDataUrl(svgEl, win) {
+    try {
+      var clone = svgEl.cloneNode(true);
+      var rect = svgEl.getBoundingClientRect();
+      var cs = win.getComputedStyle(svgEl);
+      if (!clone.getAttribute("xmlns")) {
+        clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      }
+      clone.setAttribute("width", String(Math.max(1, Math.round(rect.width || 24))));
+      clone.setAttribute("height", String(Math.max(1, Math.round(rect.height || 24))));
+      if (cs && cs.color) {
+        clone.style.color = cs.color;
+      }
+      var origChildren = svgEl.querySelectorAll("*");
+      var cloneChildren = clone.querySelectorAll("*");
+      for (var i = 0; i < origChildren.length && i < cloneChildren.length; i++) {
+        var oCs = win.getComputedStyle(origChildren[i]);
+        var cEl = cloneChildren[i];
+        if (oCs) {
+          if (oCs.fill && oCs.fill !== "none") cEl.setAttribute("fill", oCs.fill);
+          if (oCs.stroke && oCs.stroke !== "none") {
+            cEl.setAttribute("stroke", oCs.stroke);
+            if (oCs.strokeWidth) cEl.setAttribute("stroke-width", oCs.strokeWidth);
+          }
+        }
+      }
+      var xml = new XMLSerializer().serializeToString(clone);
+      return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(xml);
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  function prepareFrameAssetsForSnapshot(id) {
+    return new Promise(function (resolve) {
+      var assetCache = { bgByUrl: {}, imgByEl: new Map(), svgByEl: new Map() };
+      var e = els[id];
+      var d = BY_ID[id];
+      if (!e || !e.iframe || !d) return resolve(assetCache);
+      var doc = null;
+      var win = null;
+      try {
+        doc = e.iframe.contentDocument;
+        win = e.iframe.contentWindow;
+      } catch (_e) {
+        doc = null;
+        win = null;
+      }
+      if (!doc || !win || !doc.body) return resolve(assetCache);
+
+      var vw = win.innerWidth || d.width;
+      var vh = win.innerHeight || d.height;
+      var baseHref = (doc.location && doc.location.href && doc.location.href !== "about:blank")
+        ? doc.location.href
+        : (state.frameUrls[id] || state.url || location.href);
+
+      var tasks = [];
+      var seenBgUrls = {};
+      var allNodes = doc.body.querySelectorAll("*");
+      var maxNodes = Math.min(allNodes.length, 2500);
+
+      function queueBgImage(cs) {
+        if (!cs) return;
+        var rawUrl = extractCssUrl(cs.backgroundImage);
+        if (!rawUrl || seenBgUrls[rawUrl]) return;
+        seenBgUrls[rawUrl] = true;
+        var proxied = toProxyAssetUrl(rawUrl, id, baseHref);
+        tasks.push(loadSafeImage(proxied, 1600).then(function (img) {
+          if (img) assetCache.bgByUrl[rawUrl] = img;
+        }));
+      }
+
+      queueBgImage(win.getComputedStyle(doc.documentElement));
+      queueBgImage(win.getComputedStyle(doc.body));
+
+      for (var i = 0; i < maxNodes; i++) {
+        var el = allNodes[i];
+        var rect = el.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) continue;
+        if (rect.bottom < -40 || rect.right < -40 || rect.top > vh + 40 || rect.left > vw + 40) continue;
+
+        var tag = (el.tagName || "").toLowerCase();
+        var cs = win.getComputedStyle(el);
+        if (!cs || cs.display === "none" || cs.visibility === "hidden") continue;
+
+        queueBgImage(cs);
+        queueBgImage(win.getComputedStyle(el, "::before"));
+        queueBgImage(win.getComputedStyle(el, "::after"));
+
+        if (tag === "img") {
+          (function (imgEl) {
+            if (imgEl.complete && imgEl.naturalWidth > 0 && canDrawImageSafely(imgEl)) {
+              assetCache.imgByEl.set(imgEl, imgEl);
+              return;
+            }
+            var rawSrc = imgEl.currentSrc || imgEl.getAttribute("src") || imgEl.getAttribute("data-src") || "";
+            if (!rawSrc) return;
+            var proxiedSrc = toProxyAssetUrl(rawSrc, id, baseHref);
+            tasks.push(loadSafeImage(proxiedSrc, 1600).then(function (loaded) {
+              if (loaded) assetCache.imgByEl.set(imgEl, loaded);
+            }));
+          })(el);
+        } else if (tag === "svg") {
+          (function (svgEl) {
+            var dataUrl = serializeSvgToDataUrl(svgEl, win);
+            if (!dataUrl) return;
+            tasks.push(loadSafeImage(dataUrl, 900).then(function (loaded) {
+              if (loaded) assetCache.svgByEl.set(svgEl, loaded);
+            }));
+          })(el);
+        }
+      }
+
+      if (!tasks.length) return resolve(assetCache);
+      Promise.all(tasks).then(function () {
+        resolve(assetCache);
+      }).catch(function () {
+        resolve(assetCache);
+      });
+    });
+  }
+
+  function drawImageWithFit(ctx, img, x, y, w, h, fitMode) {
+    if (!img || w <= 0 || h <= 0) return;
+    var iw = img.naturalWidth || img.width || w;
+    var ih = img.naturalHeight || img.height || h;
+    if (iw <= 0 || ih <= 0) return;
+
+    var mode = (fitMode || "").toLowerCase();
+    if (mode.indexOf("cover") > -1) {
+      var scaleCover = Math.max(w / iw, h / ih);
+      var sw = w / scaleCover;
+      var sh = h / scaleCover;
+      var sx = Math.max(0, (iw - sw) / 2);
+      var sy = Math.max(0, (ih - sh) / 2);
+      ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
+    } else if (mode.indexOf("contain") > -1) {
+      var scaleContain = Math.min(w / iw, h / ih);
+      var dw = iw * scaleContain;
+      var dh = ih * scaleContain;
+      var dx = x + (w - dw) / 2;
+      var dy = y + (h - dh) / 2;
+      ctx.drawImage(img, dx, dy, dw, dh);
+    } else {
+      ctx.drawImage(img, x, y, w, h);
+    }
+  }
+
+  function paintPseudoOverlay(ctx, pseudoCs, nx, ny, nw, nh, radius, assetCache) {
+    if (!pseudoCs) return;
+    var content = pseudoCs.content;
+    if (!content || content === "none" || content === "normal") return;
+    var op = parseFloat(pseudoCs.opacity);
+    if (!isNaN(op) && op <= 0.01) return;
+
+    var bgCol = pseudoCs.backgroundColor;
+    var bgUrl = extractCssUrl(pseudoCs.backgroundImage);
+    var gradCols = extractGradientColors(pseudoCs.backgroundImage);
+    var hasBgCol = !isTransparentColor(bgCol);
+    var bgImg = (bgUrl && assetCache && assetCache.bgByUrl) ? assetCache.bgByUrl[bgUrl] : null;
+
+    if (!hasBgCol && !gradCols && !bgImg) return;
+
+    ctx.save();
+    if (!isNaN(op) && op < 1) ctx.globalAlpha *= op;
+    traceRoundRect(ctx, nx, ny, nw, nh, radius);
+    ctx.clip();
+
+    if (hasBgCol) {
+      ctx.fillStyle = bgCol;
+      ctx.fillRect(nx, ny, nw, nh);
+    }
+    if (bgImg) {
+      try {
+        drawImageWithFit(ctx, bgImg, nx, ny, nw, nh, pseudoCs.backgroundSize || "cover");
+      } catch (_e) {}
+    }
+    if (gradCols) {
+      var grad = ctx.createLinearGradient(nx, ny, nx, ny + nh);
+      grad.addColorStop(0, gradCols[0]);
+      grad.addColorStop(1, gradCols[1]);
+      ctx.fillStyle = grad;
+      ctx.fillRect(nx, ny, nw, nh);
+    }
+    ctx.restore();
+  }
+
+  function paintLiveIframeDom(ctx, iframe, dx, dy, dw, dh, dWidth, dHeight, fallbackSnap, assetCache) {
     var scale = dw / Math.max(1, dWidth);
     var doc = null;
     var win = null;
@@ -3510,11 +3771,10 @@
     }
 
     if (!doc || !win || !doc.body) {
-      // Fallback si el documento no es accesible directamente
-      var bgCol = (fallbackSnap && (fallbackSnap.bgPage || fallbackSnap.bg) && !isTransparentColor(fallbackSnap.bgPage || fallbackSnap.bg))
+      var bgColFallback = (fallbackSnap && (fallbackSnap.bgPage || fallbackSnap.bg) && !isTransparentColor(fallbackSnap.bgPage || fallbackSnap.bg))
         ? (fallbackSnap.bgPage || fallbackSnap.bg)
         : "#FFFFFF";
-      ctx.fillStyle = bgCol;
+      ctx.fillStyle = bgColFallback;
       ctx.fillRect(dx, dy, dw, dh);
       if (fallbackSnap && Array.isArray(fallbackSnap.nodes)) {
         fallbackSnap.nodes.forEach(function (n) {
@@ -3548,10 +3808,17 @@
     ctx.fillStyle = pageBg;
     ctx.fillRect(dx, dy, dw, dh);
 
+    var bodyBgUrl = extractCssUrl(bodyCs && bodyCs.backgroundImage) || extractCssUrl(htmlCs && htmlCs.backgroundImage);
+    if (bodyBgUrl && assetCache && assetCache.bgByUrl && assetCache.bgByUrl[bodyBgUrl]) {
+      try {
+        drawImageWithFit(ctx, assetCache.bgByUrl[bodyBgUrl], dx, dy, dw, dh, (bodyCs && bodyCs.backgroundSize) || "cover");
+      } catch (_e) {}
+    }
+
     var vw = win.innerWidth || dWidth;
     var vh = win.innerHeight || dHeight;
 
-    // 2. Recorrer todos los elementos del DOM (sin límite de 320 nodos para incluir portales y modales al final del body)
+    // 2. Recorrer todos los elementos del DOM manteniendo el orden jerárquico natural (padres antes que hijos)
     var allNodes = doc.body.querySelectorAll("*");
     var maxNodes = Math.min(allNodes.length, 4500);
     var items = [];
@@ -3570,7 +3837,6 @@
       if (rect.width < 1 || rect.height < 1) continue;
       if (rect.bottom < 0 || rect.right < 0 || rect.top > vh || rect.left > vw) continue;
 
-      // Calcular opacidad efectiva, contexto de apilamiento (modales/overlays/fixed) y recorte (overflow)
       var effOpacity = 1;
       var tier = 0;
       var effZ = 0;
@@ -3621,7 +3887,7 @@
           stoppedClipForFixed = true;
         }
         if (hasZ && zVal >= 40 && (pos === "fixed" || pos === "absolute")) {
-          if ( zVal >= 100 || MODAL_HINT_RE.test(clsAndId)) {
+          if (zVal >= 100 || MODAL_HINT_RE.test(clsAndId)) {
             isModalTree = true;
           }
         }
@@ -3649,11 +3915,11 @@
       if (clipBox.right <= clipBox.left || clipBox.bottom <= clipBox.top) continue;
       if (rect.right <= clipBox.left || rect.left >= clipBox.right || rect.bottom <= clipBox.top || rect.top >= clipBox.bottom) continue;
 
+      // IMPORTANTE: No elevar elementos con position:relative al tier 1 por encima de sus propios hijos estáticos,
+      // de lo contrario el fondo del contenedor padre tapa las imágenes y textos internos.
       if (isModalTree) {
-        tier = 3;
-      } else if (isFixedTree) {
         tier = 2;
-      } else if (cs.position !== "static" || effZ !== 0) {
+      } else if (isFixedTree) {
         tier = 1;
       } else {
         tier = 0;
@@ -3672,10 +3938,10 @@
       });
     }
 
-    // 3. Ordenar por capa real de apilamiento (flujo normal -> posicionados -> fixed -> modales/overlays)
+    // 3. Ordenar respetando el orden DOM dentro de cada capa (flujo/relativo -> fixed -> modales)
     items.sort(function (a, b) {
       if (a.tier !== b.tier) return a.tier - b.tier;
-      if (a.effZ !== b.effZ) return a.effZ - b.effZ;
+      if (a.tier > 0 && a.effZ !== b.effZ) return a.effZ - b.effZ;
       return a.domOrder - b.domOrder;
     });
 
@@ -3696,7 +3962,6 @@
 
       ctx.save();
 
-      // Recorte del contenedor padre si aplica
       var cx = dx + Math.max(0, it.clipBox.left) * scale;
       var cy = dy + Math.max(0, it.clipBox.top) * scale;
       var cw = Math.min(vw, it.clipBox.right) * scale - Math.max(0, it.clipBox.left) * scale;
@@ -3707,7 +3972,6 @@
 
       ctx.globalAlpha = Math.max(0, Math.min(1, it.effOpacity));
 
-      // Si es un <dialog open>, pintar su ::backdrop si existe
       if (tag === "dialog") {
         var bdCs = win.getComputedStyle(el, "::backdrop");
         var bdCol = (bdCs && !isTransparentColor(bdCs.backgroundColor)) ? bdCs.backgroundColor : "rgba(15, 23, 42, 0.45)";
@@ -3717,16 +3981,16 @@
 
       var radius = parseCssRadius(cs.borderTopLeftRadius || cs.borderRadius, nw, nh);
 
-      // Sombra (box-shadow) para tarjetas y modales
+      // Sombra (box-shadow)
       var bShadow = cs.boxShadow;
       if (bShadow && bShadow !== "none" && bShadow.indexOf("inset") === -1) {
         var shColMatch = bShadow.match(/(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8})/);
         if (shColMatch) {
           ctx.save();
           ctx.shadowColor = shColMatch[0];
-          ctx.shadowBlur = Math.min(24, (it.tier >= 3 ? 18 : 8) * scale);
+          ctx.shadowBlur = Math.min(20, (it.tier >= 2 ? 16 : 6) * scale);
           ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = (it.tier >= 3 ? 6 : 2) * scale;
+          ctx.shadowOffsetY = (it.tier >= 2 ? 5 : 2) * scale;
           traceRoundRect(ctx, nx, ny, nw, nh, radius);
           ctx.fillStyle = !isTransparentColor(cs.backgroundColor) ? cs.backgroundColor : "rgba(255,255,255,0.01)";
           ctx.fill();
@@ -3734,35 +3998,59 @@
         }
       }
 
-      // Fondo (color sólido o gradiente lineal)
+      // Color de fondo sólido
       var bgCol = cs.backgroundColor;
+      if (!isTransparentColor(bgCol)) {
+        traceRoundRect(ctx, nx, ny, nw, nh, radius);
+        ctx.fillStyle = bgCol;
+        ctx.fill();
+      } else if (it.tier >= 1 && ((cs.backdropFilter && cs.backdropFilter !== "none") || (cs.webkitBackdropFilter && cs.webkitBackdropFilter !== "none"))) {
+        traceRoundRect(ctx, nx, ny, nw, nh, radius);
+        ctx.fillStyle = "rgba(15, 23, 42, 0.25)";
+        ctx.fill();
+      }
+
+      // Imagen de fondo CSS (background-image: url(...))
+      var elBgUrl = extractCssUrl(cs.backgroundImage);
+      var elBgImg = (elBgUrl && assetCache && assetCache.bgByUrl) ? assetCache.bgByUrl[elBgUrl] : null;
+      if (elBgImg) {
+        try {
+          ctx.save();
+          traceRoundRect(ctx, nx, ny, nw, nh, radius);
+          ctx.clip();
+          drawImageWithFit(ctx, elBgImg, nx, ny, nw, nh, cs.backgroundSize || "cover");
+          ctx.restore();
+        } catch (_e) {}
+      }
+
+      // Gradiente CSS (linear-gradient / radial-gradient)
       var gradCols = extractGradientColors(cs.backgroundImage);
       if (gradCols) {
-        var grad = ctx.createLinearGradient(nx, ny, nx + nw, ny + nh);
+        var grad = ctx.createLinearGradient(nx, ny, nx, ny + nh);
         grad.addColorStop(0, gradCols[0]);
         grad.addColorStop(1, gradCols[1]);
         traceRoundRect(ctx, nx, ny, nw, nh, radius);
         ctx.fillStyle = grad;
         ctx.fill();
-      } else if (!isTransparentColor(bgCol)) {
-        traceRoundRect(ctx, nx, ny, nw, nh, radius);
-        ctx.fillStyle = bgCol;
-        ctx.fill();
-      } else if (it.tier >= 3 && (cs.backdropFilter && cs.backdropFilter !== "none" || cs.webkitBackdropFilter && cs.webkitBackdropFilter !== "none")) {
-        traceRoundRect(ctx, nx, ny, nw, nh, radius);
-        ctx.fillStyle = "rgba(15, 23, 42, 0.28)";
-        ctx.fill();
       }
 
-      // Imágenes reales (<img> y <canvas>)
+      // Pseudo-elemento ::before (muy usado para overlays oscuros sobre imágenes/banners)
+      try {
+        var beforeCs = win.getComputedStyle(el, "::before");
+        paintPseudoOverlay(ctx, beforeCs, nx, ny, nw, nh, radius, assetCache);
+      } catch (_e) {}
+
+      // Imágenes reales (<img>, <canvas>, <svg>)
       if (tag === "img") {
         var drawnImg = false;
-        if (el.complete && el.naturalWidth > 0 && canDrawImageSafely(el)) {
+        var cachedImg = (assetCache && assetCache.imgByEl && assetCache.imgByEl.get(el)) ||
+                        ((el.complete && el.naturalWidth > 0 && canDrawImageSafely(el)) ? el : null);
+        if (cachedImg) {
           try {
             ctx.save();
             traceRoundRect(ctx, nx, ny, nw, nh, radius);
             ctx.clip();
-            ctx.drawImage(el, nx, ny, nw, nh);
+            drawImageWithFit(ctx, cachedImg, nx, ny, nw, nh, cs.objectFit || "fill");
             ctx.restore();
             drawnImg = true;
           } catch (_e) {
@@ -3771,7 +4059,7 @@
         }
         if (!drawnImg) {
           traceRoundRect(ctx, nx, ny, nw, nh, radius);
-          ctx.fillStyle = "rgba(148, 163, 184, 0.18)";
+          ctx.fillStyle = "rgba(148, 163, 184, 0.16)";
           ctx.fill();
         }
       } else if (tag === "canvas") {
@@ -3780,45 +4068,51 @@
             ctx.drawImage(el, nx, ny, nw, nh);
           } catch (_e) {}
         }
-      } else if (tag === "svg" && typeof Path2D !== "undefined") {
-        // Renderizado vectorial de iconos SVG
-        try {
-          var vb = el.viewBox && el.viewBox.baseVal;
-          var vbW = (vb && vb.width) ? vb.width : (parseFloat(el.getAttribute("width")) || 24);
-          var vbH = (vb && vb.height) ? vb.height : (parseFloat(el.getAttribute("height")) || 24);
-          var vbX = (vb && vb.x) ? vb.x : 0;
-          var vbY = (vb && vb.y) ? vb.y : 0;
-          if (vbW > 0 && vbH > 0) {
-            ctx.save();
-            ctx.translate(nx, ny);
-            ctx.scale(nw / vbW, nh / vbH);
-            ctx.translate(-vbX, -vbY);
-            var svgPaths = el.querySelectorAll("path");
-            var svgColor = cs.color || "#1B1F1D";
-            for (var sp = 0; sp < svgPaths.length; sp++) {
-              var pEl = svgPaths[sp];
-              var dAttr = pEl.getAttribute("d");
-              if (!dAttr) continue;
-              var pCs = win.getComputedStyle(pEl);
-              var p2d = new Path2D(dAttr);
-              var fillAttr = pEl.getAttribute("fill") || (pCs && pCs.fill) || "";
-              var strokeAttr = pEl.getAttribute("stroke") || (pCs && pCs.stroke) || "";
-              if (fillAttr && fillAttr !== "none" && !isTransparentColor(fillAttr)) {
-                ctx.fillStyle = (fillAttr === "currentColor") ? svgColor : fillAttr;
-                ctx.fill(p2d);
+      } else if (tag === "svg") {
+        var svgImg = assetCache && assetCache.svgByEl ? assetCache.svgByEl.get(el) : null;
+        if (svgImg) {
+          try {
+            ctx.drawImage(svgImg, nx, ny, nw, nh);
+          } catch (_e) {}
+        } else if (typeof Path2D !== "undefined") {
+          try {
+            var vb = el.viewBox && el.viewBox.baseVal;
+            var vbW = (vb && vb.width) ? vb.width : (parseFloat(el.getAttribute("width")) || 24);
+            var vbH = (vb && vb.height) ? vb.height : (parseFloat(el.getAttribute("height")) || 24);
+            var vbX = (vb && vb.x) ? vb.x : 0;
+            var vbY = (vb && vb.y) ? vb.y : 0;
+            if (vbW > 0 && vbH > 0) {
+              ctx.save();
+              ctx.translate(nx, ny);
+              ctx.scale(nw / vbW, nh / vbH);
+              ctx.translate(-vbX, -vbY);
+              var svgPaths = el.querySelectorAll("path");
+              var svgColor = cs.color || "#1B1F1D";
+              for (var sp = 0; sp < svgPaths.length; sp++) {
+                var pEl = svgPaths[sp];
+                var dAttr = pEl.getAttribute("d");
+                if (!dAttr) continue;
+                var pCs = win.getComputedStyle(pEl);
+                var p2d = new Path2D(dAttr);
+                var fillAttr = pEl.getAttribute("fill") || (pCs && pCs.fill) || "";
+                var strokeAttr = pEl.getAttribute("stroke") || (pCs && pCs.stroke) || "";
+                if (fillAttr && fillAttr !== "none" && !isTransparentColor(fillAttr)) {
+                  ctx.fillStyle = (fillAttr === "currentColor") ? svgColor : fillAttr;
+                  ctx.fill(p2d);
+                }
+                if (strokeAttr && strokeAttr !== "none" && !isTransparentColor(strokeAttr)) {
+                  ctx.strokeStyle = (strokeAttr === "currentColor") ? svgColor : strokeAttr;
+                  ctx.lineWidth = parseFloat(pEl.getAttribute("stroke-width") || (pCs && pCs.strokeWidth) || "1.8") || 1.8;
+                  ctx.stroke(p2d);
+                } else if (!fillAttr || fillAttr === "currentColor") {
+                  ctx.fillStyle = svgColor;
+                  ctx.fill(p2d);
+                }
               }
-              if (strokeAttr && strokeAttr !== "none" && !isTransparentColor(strokeAttr)) {
-                ctx.strokeStyle = (strokeAttr === "currentColor") ? svgColor : strokeAttr;
-                ctx.lineWidth = parseFloat(pEl.getAttribute("stroke-width") || (pCs && pCs.strokeWidth) || "1.8") || 1.8;
-                ctx.stroke(p2d);
-              } else if (!fillAttr || fillAttr === "currentColor") {
-                ctx.fillStyle = svgColor;
-                ctx.fill(p2d);
-              }
+              ctx.restore();
             }
-            ctx.restore();
-          }
-        } catch (_e) {}
+          } catch (_e) {}
+        }
       }
 
       // Bordes (uniformes o por lado)
@@ -3885,7 +4179,7 @@
             isPlaceholder = true;
           }
           if (valStr) {
-            var fSizeIn = Math.max(6, Math.min(26, (parseFloat(cs.fontSize) || 13) * scale));
+            var fSizeIn = Math.max(5.5, Math.min(28, (parseFloat(cs.fontSize) || 13) * scale));
             var fwIn = parseInt(cs.fontWeight || "400", 10);
             ctx.font = (fwIn >= 600 ? "600 " : "400 ") + fSizeIn + "px " + (cs.fontFamily || "-apple-system, sans-serif");
             ctx.fillStyle = isPlaceholder ? "rgba(100, 116, 139, 0.75)" : (cs.color || "#1B1F1D");
@@ -3904,13 +4198,23 @@
       // Nodos de texto directos (con posicionamiento exacto por línea vía Range.getClientRects)
       var childNodes = el.childNodes;
       if (childNodes && childNodes.length > 0 && tag !== "script" && tag !== "style" && tag !== "select" && tag !== "textarea") {
-        var fSize = Math.max(5.5, Math.min(36, (parseFloat(cs.fontSize) || 13) * scale));
+        var fSize = Math.max(4.5, Math.min(48, (parseFloat(cs.fontSize) || 13) * scale));
         var fwNum = parseInt(cs.fontWeight || "400", 10);
         var fStyle = (cs.fontStyle === "italic" ? "italic " : "");
         var fWeight = (!isNaN(fwNum) && fwNum >= 600) || cs.fontWeight === "bold" ? "600 " : "400 ";
         ctx.font = fStyle + fWeight + fSize + "px " + (cs.fontFamily || "-apple-system, BlinkMacSystemFont, sans-serif");
         ctx.fillStyle = cs.color || "#1B1F1D";
         ctx.textBaseline = "alphabetic";
+
+        var tShadow = cs.textShadow;
+        var hasTextShadow = tShadow && tShadow !== "none";
+        if (hasTextShadow) {
+          var tsCol = tShadow.match(/(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8})/);
+          if (tsCol) {
+            ctx.shadowColor = tsCol[0];
+            ctx.shadowBlur = 4 * scale;
+          }
+        }
 
         for (var c = 0; c < childNodes.length; c++) {
           var node = childNodes[c];
@@ -3939,7 +4243,6 @@
               ctx.fillText(rawText, tx, ty);
             }
           } else {
-            // Texto multilínea: distribuir palabras según el ancho real de cada línea
             var words = rawText.split(" ");
             var wIdx = 0;
             for (var rIdx = 0; rIdx < lineRects.length && wIdx < words.length; rIdx++) {
@@ -3968,10 +4271,206 @@
             }
           }
         }
+        if (hasTextShadow) {
+          ctx.shadowColor = "transparent";
+          ctx.shadowBlur = 0;
+        }
       }
+
+      // Pseudo-elemento ::after
+      try {
+        var afterCs = win.getComputedStyle(el, "::after");
+        paintPseudoOverlay(ctx, afterCs, nx, ny, nw, nh, radius, assetCache);
+      } catch (_e) {}
 
       ctx.restore();
     }
+  }
+
+  function paintCuttingMatBackground(ctx, x, y, w, h) {
+    ctx.save();
+    ctx.fillStyle = "#1F4D45";
+    ctx.fillRect(x, y, w, h);
+
+    ctx.strokeStyle = "rgba(232, 239, 235, 0.05)";
+    ctx.lineWidth = 1;
+    for (var gx = x; gx < x + w; gx += 20) {
+      ctx.beginPath(); ctx.moveTo(gx, y); ctx.lineTo(gx, y + h); ctx.stroke();
+    }
+    for (var gy = y; gy < y + h; gy += 20) {
+      ctx.beginPath(); ctx.moveTo(x, gy); ctx.lineTo(x + w, gy); ctx.stroke();
+    }
+
+    ctx.strokeStyle = "rgba(232, 239, 235, 0.11)";
+    ctx.lineWidth = 1;
+    for (var mx = x; mx < x + w; mx += 100) {
+      ctx.beginPath(); ctx.moveTo(mx, y); ctx.lineTo(mx, y + h); ctx.stroke();
+    }
+    for (var my = y; my < y + h; my += 100) {
+      ctx.beginPath(); ctx.moveTo(x, my); ctx.lineTo(x + w, my); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function paintDeviceFrameOnMat(ctx, id, stageRect, offsetX, offsetY, snapByFrame, assetsByFrame) {
+    var e = els[id];
+    var d = BY_ID[id];
+    if (!e || !d) return;
+    var bezelRect = e.bezel.getBoundingClientRect();
+    var screenRect = e.screen.getBoundingClientRect();
+
+    var bx = bezelRect.left - stageRect.left + offsetX;
+    var by = bezelRect.top - stageRect.top + offsetY;
+    var bw = bezelRect.width;
+    var bh = bezelRect.height;
+
+    var dx = screenRect.left - stageRect.left + offsetX;
+    var dy = screenRect.top - stageRect.top + offsetY;
+    var dw = screenRect.width;
+    var dh = screenRect.height;
+    var col = deviceColor(id);
+    var scale = dw / Math.max(1, d.width);
+
+    var bezelCs = window.getComputedStyle(e.bezel);
+    var screenCs = window.getComputedStyle(e.screen);
+    var bezelRadius = parseCssRadius(bezelCs.borderTopLeftRadius || bezelCs.borderRadius || "16px", bw, bh);
+    var screenRadius = parseCssRadius(screenCs.borderTopLeftRadius || screenCs.borderRadius || "8px", dw, dh);
+
+    // 1. Bezel físico oscuro del dispositivo + borde del color identificador tal como se ve en pantalla
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.36)";
+    ctx.shadowBlur = 18;
+    ctx.shadowOffsetY = 8;
+    traceRoundRect(ctx, bx, by, bw, bh, bezelRadius);
+    ctx.fillStyle = "#121615";
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    traceRoundRect(ctx, bx, by, bw, bh, bezelRadius);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.restore();
+
+    // 2. Pantalla interna recortada con sus esquinas redondeadas reales
+    ctx.save();
+    traceRoundRect(ctx, dx, dy, dw, dh, screenRadius);
+    ctx.clip();
+
+    paintLiveIframeDom(ctx, e.iframe, dx, dy, dw, dh, d.width, d.height, snapByFrame[id], assetsByFrame[id]);
+
+    // Anotaciones de Auditoría Visual (solo si el usuario activó el resaltado de auditoría)
+    if (auditState.highlight) {
+      var devIssues = auditState.items.filter(function (iss) { return iss.device_id === id && iss.box && iss.box.width; });
+      devIssues.forEach(function (iss, iIdx) {
+        var ix = dx + (iss.box.x || 0) * scale;
+        var iy = dy + (iss.box.y || 0) * scale;
+        var iw = Math.max(16, Math.min(dw - 4, iss.box.width * scale));
+        var ih = Math.max(14, Math.min(dh - 4, iss.box.height * scale));
+        var isErr = iss.severity === "error";
+        ctx.strokeStyle = isErr ? "#DC2626" : "#D97706";
+        ctx.lineWidth = 1.75;
+        ctx.fillStyle = isErr ? "rgba(220, 38, 38, 0.14)" : "rgba(217, 119, 6, 0.14)";
+        ctx.fillRect(ix, iy, iw, ih);
+        ctx.strokeRect(ix, iy, iw, ih);
+
+        var tagTxt = "#" + (iIdx + 1) + " " + iss.kind;
+        ctx.font = "600 9.5px ui-monospace, monospace";
+        var tw = ctx.measureText(tagTxt).width + 8;
+        ctx.fillStyle = isErr ? "#DC2626" : "#D97706";
+        ctx.fillRect(ix, Math.max(dy, iy - 14), tw, 14);
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fillText(tagTxt, ix + 4, Math.max(dy + 10, iy - 4));
+      });
+    }
+
+    ctx.restore();
+
+    // 3. Etiqueta inferior del dispositivo sobre el tapete verde
+    var capY = by + bh + 16;
+    ctx.save();
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(bx + 6, capY - 4, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#E8EFEB";
+    ctx.font = "600 12px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.fillText(d.name, bx + 15, capY);
+    var nameW = ctx.measureText(d.name).width;
+
+    ctx.fillStyle = "rgba(232, 239, 235, 0.68)";
+    ctx.font = "500 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.fillText(d.width + " × " + d.height, bx + 15 + nameW + 8, capY);
+    ctx.restore();
+  }
+
+  function renderLocalWindowSnapshotDataUrl() {
+    if (!state.active.length) return Promise.resolve(null);
+    return Promise.all([
+      Promise.all(state.active.map(requestDomSnapshotFromFrame)),
+      Promise.all(state.active.map(prepareFrameAssetsForSnapshot))
+    ]).then(function (results) {
+      var snapshots = results[0] || [];
+      var assetsList = results[1] || [];
+      var snapByFrame = {};
+      var assetsByFrame = {};
+      snapshots.forEach(function (s) {
+        if (s && s.frame) snapByFrame[s.frame] = s;
+      });
+      state.active.forEach(function (id, idx) {
+        assetsByFrame[id] = assetsList[idx] || { bgByUrl: {}, imgByEl: new Map(), svgByEl: new Map() };
+      });
+
+      var dpr = 2;
+      var stageRect = stage.getBoundingClientRect();
+      var w = Math.max(640, Math.round(stageRect.width));
+      var h = Math.max(420, Math.round(stageRect.height));
+
+      var c = document.createElement("canvas");
+      c.width = w * dpr;
+      c.height = h * dpr;
+      var cctx = c.getContext("2d");
+      cctx.scale(dpr, dpr);
+
+      paintCuttingMatBackground(cctx, 0, 0, w, h);
+
+      state.active.forEach(function (id) {
+        paintDeviceFrameOnMat(cctx, id, stageRect, 0, 0, snapByFrame, assetsByFrame);
+      });
+
+      return {
+        width: w,
+        height: h,
+        dataUrl: c.toDataURL("image/png")
+      };
+    });
+  }
+
+  function collectRemoteWindowSnapshots(timeoutMs) {
+    return new Promise(function (resolve) {
+      if (!syncChannel) return resolve([]);
+      var reqId = "snap-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7);
+      var collected = [];
+      var waitMs = timeoutMs || 1400;
+
+      function onMsg(ev) {
+        var msg = ev.data;
+        if (!msg || msg.tabId === TAB_ID) return;
+        if (msg.type === "bc:window_snapshot_response" && msg.requestId === reqId && msg.dataUrl) {
+          collected.push(msg);
+        }
+      }
+
+      syncChannel.addEventListener("message", onMsg);
+      postCrossTab({ type: "bc:request_window_snapshot", requestId: reqId });
+
+      setTimeout(function () {
+        syncChannel.removeEventListener("message", onMsg);
+        resolve(collected);
+      }, waitMs);
+    });
   }
 
   function captureAnnotatedSnapshot() {
@@ -3979,199 +4478,169 @@
       toast(t("toastNoDevices"));
       return;
     }
-    Promise.all(state.active.map(requestDomSnapshotFromFrame)).then(function (snapshots) {
+
+    var hasOtherWindows = Object.keys(openSecondaryTabs).length > 0 || windowSlot === "secondary";
+    var remoteWaitMs = hasOtherWindows ? 1300 : 380;
+
+    Promise.all([
+      Promise.all(state.active.map(requestDomSnapshotFromFrame)),
+      Promise.all(state.active.map(prepareFrameAssetsForSnapshot)),
+      collectRemoteWindowSnapshots(remoteWaitMs)
+    ]).then(function (allResults) {
+      var snapshots = allResults[0] || [];
+      var assetsList = allResults[1] || [];
+      var remoteSnaps = allResults[2] || [];
+
       var snapByFrame = {};
+      var assetsByFrame = {};
       snapshots.forEach(function (s) {
         if (s && s.frame) snapByFrame[s.frame] = s;
       });
-
-      var dpr = 2;
-      var stageRect = stage.getBoundingClientRect();
-      var headerH = 52;
-      var footerH = 40;
-      var canvasW = Math.max(960, Math.round(stageRect.width));
-      var canvasH = Math.max(540, Math.round(stageRect.height)) + headerH + footerH;
-
-      var canvas = document.createElement("canvas");
-      canvas.width = canvasW * dpr;
-      canvas.height = canvasH * dpr;
-      var ctx = canvas.getContext("2d");
-      ctx.scale(dpr, dpr);
-
-      // Fondo claro neutro acorde con la interfaz (#E4E7E4)
-      ctx.fillStyle = "#E4E7E4";
-      ctx.fillRect(0, 0, canvasW, canvasH);
-
-      // Cuadrícula sutil sobre el tapete
-      ctx.strokeStyle = "rgba(27, 31, 29, 0.045)";
-      ctx.lineWidth = 1;
-      for (var gx = 0; gx < canvasW; gx += 40) {
-        ctx.beginPath(); ctx.moveTo(gx, headerH); ctx.lineTo(gx, canvasH - footerH); ctx.stroke();
-      }
-      for (var gy = headerH; gy < canvasH - footerH; gy += 40) {
-        ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(canvasW, gy); ctx.stroke();
-      }
-
-      // Barra superior clara
-      ctx.fillStyle = "#FFFFFF";
-      ctx.fillRect(0, 0, canvasW, headerH);
-      ctx.strokeStyle = "#D0D5D0";
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(0, headerH); ctx.lineTo(canvasW, headerH); ctx.stroke();
-
-      ctx.fillStyle = "#1B1F1D";
-      ctx.font = "600 14px -apple-system, BlinkMacSystemFont, sans-serif";
-      ctx.fillText("DevTool Multi-Display — Captura de Pantallas", 16, 22);
-
-      ctx.fillStyle = "#5A625D";
-      ctx.font = "500 11.5px ui-monospace, SFMono-Regular, Menlo, monospace";
-      ctx.fillText("URL: " + (state.url || "—") + "   |   Pantallas: " + state.active.length + "   |   Auditoría: " + auditState.items.length + " hallazgos", 16, 40);
-
-      // Dibujar cada dispositivo activo con su DOM en vivo (incluyendo modales, diálogos y overlays)
-      state.active.forEach(function (id) {
-        var e = els[id];
-        var d = BY_ID[id];
-        if (!e || !d) return;
-        var screenRect = e.screen.getBoundingClientRect();
-        var dx = screenRect.left - stageRect.left;
-        var dy = screenRect.top - stageRect.top + headerH;
-        var dw = screenRect.width;
-        var dh = screenRect.height;
-        var col = deviceColor(id);
-        var scale = dw / Math.max(1, d.width);
-
-        // Marco con el color de contorno único del dispositivo
-        ctx.save();
-        ctx.shadowColor = "rgba(15, 23, 42, 0.12)";
-        ctx.shadowBlur = 12;
-        ctx.shadowOffsetY = 4;
-        ctx.fillStyle = "#FFFFFF";
-        ctx.fillRect(dx - 2, dy - 2, dw + 4, dh + 4);
-        ctx.restore();
-
-        ctx.save();
-        ctx.strokeStyle = col;
-        ctx.lineWidth = 2.5;
-        ctx.strokeRect(dx - 2, dy - 2, dw + 4, dh + 4);
-
-        // Contenido real de la pantalla (live DOM + modales/stacking contexts)
-        ctx.beginPath();
-        ctx.rect(dx, dy, dw, dh);
-        ctx.clip();
-
-        paintLiveIframeDom(ctx, e.iframe, dx, dy, dw, dh, d.width, d.height, snapByFrame[id]);
-
-        // Anotaciones de Auditoría Visual sobre la pantalla (si existen hallazgos)
-        var devIssues = auditState.items.filter(function (iss) { return iss.device_id === id && iss.box && iss.box.width; });
-        devIssues.forEach(function (iss, iIdx) {
-          var ix = dx + (iss.box.x || 0) * scale;
-          var iy = dy + (iss.box.y || 0) * scale;
-          var iw = Math.max(16, Math.min(dw - 4, iss.box.width * scale));
-          var ih = Math.max(14, Math.min(dh - 4, iss.box.height * scale));
-          var isErr = iss.severity === "error";
-          ctx.strokeStyle = isErr ? "#DC2626" : "#D97706";
-          ctx.lineWidth = 1.75;
-          ctx.fillStyle = isErr ? "rgba(220, 38, 38, 0.14)" : "rgba(217, 119, 6, 0.14)";
-          ctx.fillRect(ix, iy, iw, ih);
-          ctx.strokeRect(ix, iy, iw, ih);
-
-          var tagTxt = "#" + (iIdx + 1) + " " + iss.kind;
-          ctx.font = "600 9.5px ui-monospace, monospace";
-          var tw = ctx.measureText(tagTxt).width + 8;
-          ctx.fillStyle = isErr ? "#DC2626" : "#D97706";
-          ctx.fillRect(ix, Math.max(dy, iy - 14), tw, 14);
-          ctx.fillStyle = "#FFFFFF";
-          ctx.fillText(tagTxt, ix + 4, Math.max(dy + 10, iy - 4));
-        });
-
-        // Marcadores visuales de las últimas interacciones del usuario en esta pantalla (clics, inputs, swipes)
-        var devSteps = flowState.items.filter(function (st) {
-          return st.device_id === id && st.coords && typeof st.coords.x === "number" && st.action !== "scroll";
-        }).slice(-5);
-        devSteps.forEach(function (st, sIdx) {
-          var sx = dx + st.coords.x * scale;
-          var sy = dy + st.coords.y * scale;
-          if (sx < dx || sx > dx + dw || sy < dy || sy > dy + dh) return;
-
-          if (st.action === "swipe" && typeof st.coords.endX === "number") {
-            var ex = dx + st.coords.endX * scale;
-            var ey = dy + st.coords.endY * scale;
-            ctx.strokeStyle = "rgba(26, 115, 232, 0.85)";
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(sx, sy);
-            ctx.lineTo(ex, ey);
-            ctx.stroke();
-          }
-
-          ctx.fillStyle = "rgba(26, 115, 232, 0.22)";
-          ctx.beginPath();
-          ctx.arc(sx, sy, 11, 0, Math.PI * 2);
-          ctx.fill();
-
-          ctx.fillStyle = "#1A73E8";
-          ctx.strokeStyle = "#FFFFFF";
-          ctx.lineWidth = 1.5;
-          ctx.beginPath();
-          ctx.arc(sx, sy, 7.5, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-
-          ctx.fillStyle = "#FFFFFF";
-          ctx.font = "700 8.5px ui-monospace, monospace";
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillText(String(sIdx + 1), sx, sy + 0.5);
-          ctx.textAlign = "left";
-          ctx.textBaseline = "alphabetic";
-        });
-
-        ctx.restore();
-
-        // Etiqueta inferior del dispositivo
-        ctx.fillStyle = col;
-        ctx.beginPath();
-        ctx.arc(dx + 7, dy + dh + 15, 4, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = "#1B1F1D";
-        ctx.font = "600 11.5px -apple-system, sans-serif";
-        ctx.fillText(d.name + "  (" + d.width + "×" + d.height + ")", dx + 16, dy + dh + 19);
+      state.active.forEach(function (id, idx) {
+        assetsByFrame[id] = assetsList[idx] || { bgByUrl: {}, imgByEl: new Map(), svgByEl: new Map() };
       });
 
-      // Barra inferior clara con resumen de errores de Consola y HTTP
-      ctx.fillStyle = "#FFFFFF";
-      ctx.fillRect(0, canvasH - footerH, canvasW, footerH);
-      ctx.strokeStyle = "#D0D5D0";
-      ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(0, canvasH - footerH); ctx.lineTo(canvasW, canvasH - footerH); ctx.stroke();
+      return Promise.all(remoteSnaps.map(function (rs) {
+        return loadSafeImage(rs.dataUrl, 1200).then(function (img) {
+          return img ? { meta: rs, img: img } : null;
+        });
+      })).then(function (loadedRemotes) {
+        var validRemotes = loadedRemotes.filter(Boolean);
 
-      var errCount = consoleState.items.filter(function (c) { return c.level === "error"; }).length;
-      var httpErrCount = trafficState.items.filter(function (r) { return r.status >= 400; }).length;
-      var inspText = lastInspectedElement
-        ? ("Último elemento: " + lastInspectedElement.selector + " [" + lastInspectedElement.device_name + "]")
-        : "Sin elemento inspeccionado";
-      ctx.fillStyle = "#3E4540";
-      ctx.font = "500 11.5px ui-monospace, monospace";
-      ctx.fillText(
-        "Errores Consola: " + errCount + "   |   HTTP 4xx/5xx: " + httpErrCount + "   |   " + inspText,
-        16,
-        canvasH - 15
-      );
+        var dpr = 2;
+        var stageRect = stage.getBoundingClientRect();
+        var headerH = 48;
+        var footerH = 36;
+        var sectionBannerH = 32;
 
-      canvas.toBlob(function (blob) {
-        if (!blob) return;
-        if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== "undefined") {
-          var item = new ClipboardItem({ "image/png": blob });
-          navigator.clipboard.write([item]).then(function () {
-            toast(t("snapshotCopied"));
-          }).catch(function () {
-            downloadBlobFallback(blob);
-          });
-        } else {
-          downloadBlobFallback(blob);
+        var localW = Math.max(960, Math.round(stageRect.width));
+        var localH = Math.max(500, Math.round(stageRect.height));
+
+        var maxW = localW;
+        var remotesTotalH = 0;
+        validRemotes.forEach(function (r) {
+          maxW = Math.max(maxW, r.meta.width || 960);
+          remotesTotalH += sectionBannerH + (r.meta.height || 500);
+        });
+
+        var canvasW = maxW;
+        var canvasH = headerH + (validRemotes.length ? sectionBannerH : 0) + localH + remotesTotalH + footerH;
+
+        var canvas = document.createElement("canvas");
+        canvas.width = canvasW * dpr;
+        canvas.height = canvasH * dpr;
+        var ctx = canvas.getContext("2d");
+        ctx.scale(dpr, dpr);
+
+        paintCuttingMatBackground(ctx, 0, headerH, canvasW, canvasH - headerH - footerH);
+
+        // Barra superior oscura acorde al modo consola/tapete
+        ctx.fillStyle = "#161B19";
+        ctx.fillRect(0, 0, canvasW, headerH);
+        ctx.strokeStyle = "rgba(232, 239, 235, 0.14)";
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, headerH); ctx.lineTo(canvasW, headerH); ctx.stroke();
+
+        var totalDevicesCount = state.active.length;
+        validRemotes.forEach(function (r) {
+          totalDevicesCount += (r.meta.deviceCount || 0);
+        });
+        var windowsCount = 1 + validRemotes.length;
+
+        ctx.fillStyle = "#F1F5F3";
+        ctx.font = "600 13.5px -apple-system, BlinkMacSystemFont, sans-serif";
+        ctx.fillText(
+          "DevTool Multi-Display — Captura Real (" + windowsCount + (windowsCount === 1 ? " pantalla" : " pantallas / monitores") + ")",
+          16,
+          20
+        );
+
+        ctx.fillStyle = "#9BA8A2";
+        ctx.font = "500 11.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+        ctx.fillText(
+          "URL: " + (state.url || "—") + "   |   Dispositivos capturados: " + totalDevicesCount + "   |   Auditoría: " + auditState.items.length + " hallazgos",
+          16,
+          38
+        );
+
+        var curY = headerH;
+
+        // Si hay más de una pantalla abierta, rotular cada sección
+        if (validRemotes.length > 0) {
+          ctx.fillStyle = "rgba(18, 22, 21, 0.72)";
+          ctx.fillRect(0, curY, canvasW, sectionBannerH);
+          ctx.fillStyle = "#34D399";
+          ctx.font = "600 11.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+          var localTitle = windowSlot === "secondary" ? "VENTANA ACTUAL (2DA PANTALLA / MONITOR VERTICAL)" : "VENTANA ACTUAL (PANTALLA PRINCIPAL)";
+          var localDevs = state.active.map(function (id) {
+            var d = BY_ID[id];
+            return d ? (d.name + " " + d.width + "×" + d.height) : id;
+          }).join(" · ");
+          ctx.fillText(localTitle + " — " + localDevs, 16, curY + 20);
+          curY += sectionBannerH;
         }
-      }, "image/png");
+
+        var localOffsetX = Math.max(0, Math.round((canvasW - stageRect.width) / 2));
+        state.active.forEach(function (id) {
+          paintDeviceFrameOnMat(ctx, id, stageRect, localOffsetX, curY, snapByFrame, assetsByFrame);
+        });
+        curY += localH;
+
+        // Dibujar cada una de las otras ventanas / monitores abiertos
+        validRemotes.forEach(function (r, rIdx) {
+          ctx.fillStyle = "rgba(18, 22, 21, 0.82)";
+          ctx.fillRect(0, curY, canvasW, sectionBannerH);
+          ctx.strokeStyle = "rgba(232, 239, 235, 0.16)";
+          ctx.beginPath(); ctx.moveTo(0, curY); ctx.lineTo(canvasW, curY); ctx.stroke();
+
+          ctx.fillStyle = "#60A5FA";
+          ctx.font = "600 11.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+          var remTitle = (r.meta.windowTitle || ("PANTALLA EXTERNA #" + (rIdx + 2))).toUpperCase();
+          var remDevs = Array.isArray(r.meta.devices) ? r.meta.devices.join(" · ") : "";
+          ctx.fillText(remTitle + (remDevs ? (" — " + remDevs) : ""), 16, curY + 20);
+          curY += sectionBannerH;
+
+          var rw = r.meta.width || localW;
+          var rh = r.meta.height || localH;
+          var rx = Math.max(0, Math.round((canvasW - rw) / 2));
+          ctx.drawImage(r.img, rx, curY, rw, rh);
+          curY += rh;
+        });
+
+        // Barra inferior con resumen de Consola y HTTP
+        ctx.fillStyle = "#161B19";
+        ctx.fillRect(0, canvasH - footerH, canvasW, footerH);
+        ctx.strokeStyle = "rgba(232, 239, 235, 0.14)";
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, canvasH - footerH); ctx.lineTo(canvasW, canvasH - footerH); ctx.stroke();
+
+        var errCount = consoleState.items.filter(function (c) { return c.level === "error"; }).length;
+        var httpErrCount = trafficState.items.filter(function (r) { return r.status >= 400; }).length;
+        var inspText = lastInspectedElement
+          ? ("Último elemento: " + lastInspectedElement.selector + " [" + lastInspectedElement.device_name + "]")
+          : "Sin elemento inspeccionado";
+        ctx.fillStyle = "#C6D1CC";
+        ctx.font = "500 11px ui-monospace, monospace";
+        ctx.fillText(
+          "Errores Consola: " + errCount + "   |   HTTP 4xx/5xx: " + httpErrCount + "   |   " + inspText,
+          16,
+          canvasH - 13
+        );
+
+        canvas.toBlob(function (blob) {
+          if (!blob) return;
+          if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== "undefined") {
+            var item = new ClipboardItem({ "image/png": blob });
+            navigator.clipboard.write([item]).then(function () {
+              toast(t("snapshotCopied"));
+            }).catch(function () {
+              downloadBlobFallback(blob);
+            });
+          } else {
+            downloadBlobFallback(blob);
+          }
+        }, "image/png");
+      });
     });
   }
 
