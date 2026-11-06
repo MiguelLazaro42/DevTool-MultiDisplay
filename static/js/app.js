@@ -16,10 +16,10 @@
   var t = I18N.t;
 
   // Medidas del acomodo (optimizadas para mayor aprovechamiento del espacio)
-  var PAD_X = 16, PAD_TOP = 16, PAD_BOTTOM = 22;
-  var GAP_X = 20, GAP_Y = 16;
+  var PAD_X = 12, PAD_TOP = 10, PAD_BOTTOM = 14;
+  var GAP_X = 16, GAP_Y = 12;
   var BEZEL = 8;           // marco compacto (4 px por lado)
-  var CAPTION = 28;        // etiqueta compacta
+  var CAPTION = 24;        // etiqueta compacta
   var RADIUS = { phone: 44, tablet: 18, desktop: 6 };
 
   // Zoom propio del visor (no el de Chrome). Pasos como los de Chrome.
@@ -4397,9 +4397,12 @@
     if (certBtn) {
       certBtn.classList.toggle("is-active", isActive);
       certBtn.setAttribute("aria-pressed", isActive ? "true" : "false");
+      certBtn.title = isActive && certState.filename
+        ? "Certificado mTLS activo: " + certState.filename
+        : t("certHint");
     }
     if (certBtnLabel) {
-      certBtnLabel.textContent = isActive ? (certState.filename || ".p12") : ".p12";
+      certBtnLabel.textContent = ".p12";
     }
     if (certActiveBanner) {
       certActiveBanner.hidden = !isActive;

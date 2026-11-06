@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=28">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=29">
 </head>
 <body>
   <main class="mat" aria-label="Screens" data-i18n-aria-label="screens">
@@ -38,11 +38,6 @@
         <button type="button" class="zoom-fit" id="zoom-fill" aria-pressed="true" data-i18n="zoomFill" data-i18n-title="zoomFillTitle">Fill</button>
         <button type="button" class="zoom-fit" id="stack-btn" aria-pressed="false" data-i18n="stackMode" data-i18n-title="stackModeTitle">Vertical</button>
       </div>
-      <p class="mat-legend">
-        <span class="mat-legend-cell" aria-hidden="true"></span>
-        <span data-i18n="gridLegend">1 square = 100 px</span>
-      </p>
-      <p class="mat-hint" data-i18n="scrollHint">Scroll on the mat to move every screen at once</p>
     </div>
 
     <!-- Banner permanente de instrucciones mientras el modo Inspección está activo -->
@@ -341,28 +336,29 @@
       <button type="submit" class="btn btn-quiet" data-i18n="load">Load</button>
     </form>
 
-    <button type="button" class="bar btn btn-sync is-active" id="sync-btn"
-            title="Sync scroll, clicks and typing across all screens"
-            data-i18n-title="syncHint" aria-pressed="true">
-      <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
-        <path d="M4 7h11l-3-3M16 13H5l3 3"/>
-      </svg>
-      <span class="btn-sync-text" data-i18n="sync">Sync</span>
-    </button>
-
-    <button type="button" class="bar btn btn-inspect" id="inspect-btn"
-            title="Inspect an element and copy its code (Cmd/Ctrl+Shift+C)"
-            data-i18n-title="inspectHint" aria-pressed="false">
-      <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
-        <circle cx="10" cy="10" r="7"/>
-        <line x1="10" y1="1" x2="10" y2="4"/>
-        <line x1="10" y1="16" x2="10" y2="19"/>
-        <line x1="1" y1="10" x2="4" y2="10"/>
-        <line x1="16" y1="10" x2="19" y2="10"/>
-        <circle cx="10" cy="10" r="2" fill="currentColor"/>
-      </svg>
-      <span class="btn-inspect-text" data-i18n="inspect">Inspect</span>
-    </button>
+    <div class="bar bar-tools-group">
+      <button type="button" class="btn btn-sync is-active" id="sync-btn"
+              title="Sync scroll, clicks and typing across all screens"
+              data-i18n-title="syncHint" aria-pressed="true">
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M4 7h11l-3-3M16 13H5l3 3"/>
+        </svg>
+        <span class="btn-sync-text" data-i18n="sync">Sync</span>
+      </button>
+      <button type="button" class="btn btn-inspect" id="inspect-btn"
+              title="Inspect an element and copy its code (Cmd/Ctrl+Shift+C)"
+              data-i18n-title="inspectHint" aria-pressed="false">
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r="7"/>
+          <line x1="10" y1="1" x2="10" y2="4"/>
+          <line x1="10" y1="16" x2="10" y2="19"/>
+          <line x1="1" y1="10" x2="4" y2="10"/>
+          <line x1="16" y1="10" x2="19" y2="10"/>
+          <circle cx="10" cy="10" r="2" fill="currentColor"/>
+        </svg>
+        <span class="btn-inspect-text" data-i18n="inspect">Inspect</span>
+      </button>
+    </div>
 
     <div class="bar bar-traffic-group">
       <button type="button" class="btn btn-traffic" id="traffic-btn"
@@ -372,7 +368,7 @@
           <path d="M3 6h14M3 10h10M3 14h7"/>
           <circle cx="15.5" cy="13.5" r="2.5"/>
         </svg>
-        <span class="btn-traffic-text" data-i18n="traffic">Peticiones</span>
+        <span class="btn-traffic-text" data-i18n="traffic">HTTP</span>
         <span class="traffic-badge" id="traffic-count">0</span>
       </button>
       <button type="button" class="btn btn-traffic btn-console" id="console-btn"
@@ -424,7 +420,7 @@
           <rect x="4" y="3" width="12" height="14" rx="1.8"/>
           <path d="M7 7h6M7 10.5h6M7 14h4"/>
         </svg>
-        <span data-i18n="aiReportBtn">Reporte</span>
+        <span class="btn-ai-text" data-i18n="aiReportBtn">Reporte</span>
       </button>
       <button type="button" class="btn btn-ai-snapshot" id="snapshot-btn"
               title="Copiar captura visual al portapapeles (PNG)"
@@ -433,7 +429,7 @@
           <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h2.1l1.1-1.5h4.6L13.4 5h2.1A1.5 1.5 0 0 1 17 6.5v8A1.5 1.5 0 0 1 15.5 16h-11A1.5 1.5 0 0 1 3 14.5v-8Z"/>
           <circle cx="10" cy="10.5" r="2.8"/>
         </svg>
-        <span data-i18n="snapshotBtn">Captura</span>
+        <span class="btn-ai-text" data-i18n="snapshotBtn">Captura</span>
       </button>
       <button type="button" class="btn btn-cert" id="cert-btn"
               title="Configurar certificado cliente (.p12 / .pfx) para autenticar los visualizadores en sitios de desarrollo"
@@ -451,14 +447,13 @@
             title="Reload every screen and clear cache, storage & cookies" data-i18n-title="refreshTitle">
       <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.76-4.24"/><path d="M16 3.5v3.2h-3.2"/></svg>
       <span class="btn-refresh-text" data-i18n="refresh">Refresh</span>
-      <span class="btn-refresh-hint" data-i18n="refreshHint">clears cache &amp; cookies</span>
     </button>
 
     <div class="bar bar-add">
       <button type="button" class="btn btn-add" id="add-btn"
               aria-haspopup="menu" aria-expanded="false" aria-controls="device-menu">
         <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>
-        <span data-i18n="addDevice">Add device</span>
+        <span class="btn-add-text" data-i18n="addDevice">Devices</span>
         <svg class="bar-caret" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 12 4-4 4 4"/></svg>
       </button>
       <div class="device-menu" id="device-menu" role="menu" aria-label="Devices" data-i18n-aria-label="devicesMenu" hidden></div>
@@ -563,7 +558,7 @@
 
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=28"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=28"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=29"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=29"></script>
 </body>
 </html>
