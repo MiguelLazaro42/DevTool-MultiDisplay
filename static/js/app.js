@@ -1051,6 +1051,22 @@
       })
       .then(function () {
         clearSiteCacheAndStorage();
+        trafficState.items = [];
+        trafficState.lastId = 0;
+        consoleState.items = [];
+        consoleState.lastId = 0;
+        auditState.items = [];
+        flowState.items = [];
+        flowState.lastId = 0;
+        storageState.rows = [];
+        templatesByDevice = {};
+        inspectedByTier = { mobile: null, desktop: null };
+        inspectedByDevice = {};
+        lastInspectedElement = null;
+        if (trafficCountBadge) trafficCountBadge.textContent = "0";
+        if (consoleCountBadge) { consoleCountBadge.textContent = "0"; consoleCountBadge.classList.remove("has-errors"); }
+        if (auditCountBadge) { auditCountBadge.textContent = "0"; auditCountBadge.classList.remove("has-errors"); }
+        if (flowCountBadge) flowCountBadge.textContent = "0";
         if (!state.url) {
           toast(t("toastClearedNoUrl"));
           return;
@@ -2825,17 +2841,28 @@
   function buildAiMarkdownReport() {
     var inc = getAiModalToggleMap();
     var nowStr = new Date().toLocaleTimeString();
+    var activeSet = {};
+    state.active.forEach(function (id) { activeSet[id] = true; });
+
     var activeDevs = state.active.map(function (id) {
       var d = BY_ID[id];
       return d ? ("[" + getDeviceTierTag(id) + "] " + d.name + " (" + d.width + "×" + d.height + " @" + d.dpr + "x)") : id;
     });
 
-    // Agrupar perfiles de templates activos (incluyendo pantallas abiertas en otros monitores)
+    // Priorizar siempre los templates de los dispositivos activos en esta ventana
     var mobileTpl = null;
     var desktopTpl = null;
+    state.active.forEach(function (devId) {
+      var tpl = templatesByDevice[devId];
+      if (!tpl) return;
+      if (tpl.tier === "mobile" && !mobileTpl) mobileTpl = tpl;
+      if (tpl.tier === "desktop" && !desktopTpl) desktopTpl = tpl;
+    });
+    // Respaldo solo si hay otra ventana (popout) abierta con la misma URL
     Object.keys(templatesByDevice).forEach(function (devId) {
       var tpl = templatesByDevice[devId];
       if (!tpl) return;
+      if (state.url && tpl.url && tpl.url.indexOf(state.url.replace(/\/$/, "")) === -1) return;
       if (tpl.tier === "mobile" && !mobileTpl) mobileTpl = tpl;
       if (tpl.tier === "desktop" && !desktopTpl) desktopTpl = tpl;
     });
@@ -2882,10 +2909,20 @@
     }
 
     if (inc.console) {
-      var errWarns = consoleState.items.filter(function (c) {
+      var seenConsoleKeys = {};
+      var activeConsole = consoleState.items.filter(function (c) {
+        if (state.active.length && !activeSet[c.device_id]) return false;
+        var msg = (c.message || "").trim();
+        if (msg === "Script error." || msg === "Script error") return false;
+        var dedupKey = c.device_id + "|" + c.level + "|" + msg;
+        if (seenConsoleKeys[dedupKey]) return false;
+        seenConsoleKeys[dedupKey] = true;
+        return true;
+      });
+      var errWarns = activeConsole.filter(function (c) {
         return c.level === "error" || c.level === "warn";
       }).slice(-15);
-      var recentLogs = errWarns.length ? errWarns : consoleState.items.slice(-10);
+      var recentLogs = errWarns.length ? errWarns : activeConsole.slice(-10);
       md.push("## 2. Consola del Navegador por Versión (" + errWarns.length + " errores/warnings)");
       if (recentLogs.length) {
         recentLogs.forEach(function (c) {
@@ -2902,8 +2939,20 @@
     }
 
     if (inc.http) {
-      var failedHttp = trafficState.items.filter(function (r) { return r.status >= 400 || r.status === 0; }).slice(-10);
-      var recentHttp = trafficState.items.slice(-8);
+      var activeTraffic = trafficState.items.filter(function (r) {
+        return !state.active.length || activeSet[r.device_id];
+      });
+      // Ignorar errores HTTP antiguos (ej. 503 de mantenimiento) si la misma URL ya respondió 200 después en ese dispositivo
+      var latestStatusByReq = {};
+      activeTraffic.forEach(function (r) {
+        latestStatusByReq[r.device_id + "|" + r.method + "|" + r.url] = r.status;
+      });
+      var failedHttp = activeTraffic.filter(function (r) {
+        if (r.status < 400 && r.status !== 0) return false;
+        var latestSt = latestStatusByReq[r.device_id + "|" + r.method + "|" + r.url];
+        return latestSt >= 400 || latestSt === 0;
+      }).slice(-10);
+      var recentHttp = activeTraffic.slice(-8);
       md.push("## 3. Tráfico HTTP / API por Versión (" + failedHttp.length + " peticiones fallidas 4xx/5xx)");
       if (failedHttp.length) {
         md.push("### Peticiones con error (4xx / 5xx):");
@@ -2928,9 +2977,12 @@
     }
 
     if (inc.audit) {
-      md.push("## 4. Auditoría Visual y Responsiva (Móvil vs. Desktop · " + auditState.items.length + " hallazgos)");
-      if (auditState.items.length) {
-        auditState.items.slice(0, 15).forEach(function (a) {
+      var activeAudit = auditState.items.filter(function (a) {
+        return !state.active.length || activeSet[a.device_id];
+      });
+      md.push("## 4. Auditoría Visual y Responsiva (Móvil vs. Desktop · " + activeAudit.length + " hallazgos)");
+      if (activeAudit.length) {
+        activeAudit.slice(0, 15).forEach(function (a) {
           var tierTag = getDeviceTierTag(a.device_id);
           md.push("- **[" + tierTag + " · " + a.device_name + "]** **[" + a.kind + "]** (`" + a.selector + "`): " + a.summary + " — _" + a.detail + "_");
         });
@@ -2941,10 +2993,12 @@
     }
 
     if (inc.flow) {
-      var recentSteps = flowState.items.slice(-20);
+      var activeSteps = flowState.items.filter(function (st) {
+        return !state.active.length || activeSet[st.device_id];
+      }).slice(-20);
       md.push("## 5. Rastreador de Interacciones del Usuario (Clics, Scroll, Zona y Sección en Móvil y Desktop)");
-      if (recentSteps.length) {
-        recentSteps.forEach(function (st, idx) {
+      if (activeSteps.length) {
+        activeSteps.forEach(function (st, idx) {
           var tierTag = getDeviceTierTag(st.device_id);
           md.push(formatFlowStepLine(st, idx + 1) + " **[" + tierTag + "]**");
         });
@@ -2955,9 +3009,12 @@
     }
 
     if (inc.storage) {
+      var activeStorage = storageState.rows.filter(function (row) {
+        return row.device_id === "all" || !state.active.length || activeSet[row.device_id];
+      });
       md.push("## 6. Estado de Sesión (Cookies, Storage y JWT por Versión)");
-      if (storageState.rows.length) {
-        storageState.rows.slice(0, 15).forEach(function (row) {
+      if (activeStorage.length) {
+        activeStorage.slice(0, 15).forEach(function (row) {
           var tierTag = row.device_id === "all" ? "GLOBAL" : getDeviceTierTag(row.device_id);
           var jwtInfo = row.jwt && row.jwt.expStatus ? (" — **JWT: " + row.jwt.expStatus.summary + "**") : "";
           md.push("- **[" + tierTag + " · " + row.device_name + "]** **[" + row.scope + "]** `" + row.key + "` = `" + String(row.value).slice(0, 90) + "`" + jwtInfo);

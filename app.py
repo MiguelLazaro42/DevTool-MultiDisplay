@@ -803,49 +803,56 @@ def _execute_proxy(url, frame_id, device):
             _site_by_frame[frame_id] = {"base_url": final_url, "device_id": device["id"]}
             _last_proxied_site.update({"base_url": final_url, "frame_id": frame_id, "device_id": device["id"]})
 
-    record_traffic(
-        device,
-        request.method,
-        final_url,
-        headers,
-        data,
-        upstream.status_code,
-        upstream.reason,
-        upstream.headers,
-        body,
-        dur,
-        is_html_doc,
+    ct_lower = content_type.lower()
+    is_static_subresource = (
+        not is_html_doc
+        and request.method == "GET"
+        and upstream.status_code < 400
+        and (
+            sec_dest in ("image", "font", "style", "script", "audio", "video", "manifest")
+            or any(ct_lower.startswith(p) for p in ("image/", "font/", "text/css", "application/javascript", "text/javascript", "application/font", "application/x-font", "audio/", "video/"))
+            or any(urlparse(final_url).path.lower().endswith(ext) for ext in (".webp", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".otf", ".ttf", ".eot", ".css", ".js", ".map"))
+        )
     )
 
-    with _cert_lock:
-        cert_proxy_assets = bool(_cert_state["active"] and _cert_state["proxy_assets"])
+    if not is_static_subresource:
+        record_traffic(
+            device,
+            request.method,
+            final_url,
+            headers,
+            data,
+            upstream.status_code,
+            upstream.reason,
+            upstream.headers,
+            body,
+            dur,
+            is_html_doc,
+        )
 
     if is_html_doc:
-        if "charset" not in content_type.lower():
+        if "charset" not in ct_lower:
             upstream.encoding = upstream.apparent_encoding or "utf-8"
         text = upstream.text
         text = META_CSP_RE.sub("", text)
-        if cert_proxy_assets:
-            text = _rewrite_html_assets_for_proxy(text, final_url, frame_id, device["id"])
-            # Sin <base href="https://..."> cuando .p12 está activo: así Chrome jamás conecta
-            # directamente al servidor mTLS ni abre el diálogo de contraseña del Llavero de macOS.
-            injection = (
-                '<link rel="icon" href="data:,">'
-                + frame_script(frame_id, device["id"], cert_proxy_assets=True, base_url=final_url)
-            )
-        else:
-            injection = (
-                f'<base href="{html.escape(final_url, quote=True)}">'
-                + frame_script(frame_id, device["id"], cert_proxy_assets=False, base_url=final_url)
-            )
+        # Reescribir siempre los recursos del mismo dominio (.otf/.woff2, <script>, <link>, <img>)
+        # a través del proxy local para:
+        # 1) Evitar bloqueos CORS en fuentes (@font-face / <link rel="preload" as="font">) sin tocar el servidor.
+        # 2) Evitar "Script error." enmascarado por cross-origin en scripts del sitio.
+        # 3) Soportar certificados cliente .p12 sin disparar el Llavero de macOS.
+        text = _rewrite_html_assets_for_proxy(text, final_url, frame_id, device["id"])
+        injection = (
+            '<link rel="icon" href="data:,">'
+            + frame_script(frame_id, device["id"], cert_proxy_assets=True, base_url=final_url)
+        )
         if HEAD_OPEN_RE.search(text):
             text = HEAD_OPEN_RE.sub(lambda m: m.group(0) + injection, text, count=1)
         else:
             text = injection + text
         body = text.encode("utf-8")
         content_type = "text/html; charset=utf-8"
-    elif "text/css" in content_type.lower() and cert_proxy_assets:
-        if "charset" not in content_type.lower():
+    elif "text/css" in ct_lower:
+        if "charset" not in ct_lower:
             upstream.encoding = upstream.apparent_encoding or "utf-8"
         css_text = _rewrite_css_urls_for_proxy(upstream.text, final_url, frame_id, device["id"])
         body = css_text.encode("utf-8")
@@ -889,7 +896,8 @@ def catch_all_relative_proxy(_err):
 @app.route("/api/reset", methods=["POST"])
 def reset():
     """Borra todo el caché y las cookies: las sesiones del servidor (un jar por
-    pantalla), el caché HTTP del navegador y las cookies de este origen."""
+    pantalla), el caché HTTP del navegador, telemetría previa y las cookies de este origen."""
+    global _last_inspected
     with _sessions_lock:
         cleared = len(_sessions)
         for session in _sessions.values():
@@ -898,6 +906,20 @@ def reset():
 
     with _storage_lock:
         _client_storage_by_device.clear()
+    with _traffic_lock:
+        _traffic_log.clear()
+    with _console_lock:
+        _console_log.clear()
+    with _audit_lock:
+        _audit_by_device.clear()
+    with _flow_lock:
+        _flow_log.clear()
+    with _templates_lock:
+        _templates_by_device.clear()
+    with _inspected_lock:
+        _last_inspected = None
+        _inspected_by_tier.clear()
+        _inspected_by_device.clear()
 
     resp = jsonify({"ok": True, "cleared_sessions": cleared})
     resp.headers["Clear-Site-Data"] = '"cache", "cookies"'

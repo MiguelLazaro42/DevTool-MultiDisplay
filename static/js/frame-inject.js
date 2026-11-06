@@ -328,6 +328,10 @@
       return;
     }
     var msg = e.message || "Uncaught Error";
+    // Ignorar el evento genérico "Script error." sin origen ni línea (enmascarado por CORS de scripts externos)
+    if ((msg === "Script error." || msg === "Script error") && !e.filename && !e.lineno) {
+      return;
+    }
     var loc = (e.filename ? e.filename.split("/").pop() : "script") + (e.lineno ? (":" + e.lineno + (e.colno ? ":" + e.colno : "")) : "");
     var stack = (e.error && e.error.stack) ? e.error.stack : (msg + "\n  at " + (e.filename || "") + ":" + (e.lineno || 0));
     try {
@@ -2019,6 +2023,30 @@
     } catch (_e) {}
   }
 
+  function isScreenReaderOrVisuallyHidden(el, r, cs) {
+    if (!el) return false;
+    var rect = r || el.getBoundingClientRect();
+    var style = cs || window.getComputedStyle(el);
+    // Patrón estándar sr-only / visually-hidden (1x1px, clip rect(0,0,0,0), inset(50%))
+    if ((rect.width <= 4 && rect.height <= 4) || (el.clientWidth > 0 && el.clientWidth <= 4) || (el.clientHeight > 0 && el.clientHeight <= 4)) {
+      return true;
+    }
+    if (style.clip && style.clip !== "auto" && (style.clip.indexOf("0px") > -1 || style.clip.indexOf("1px") > -1)) {
+      return true;
+    }
+    if (style.clipPath && style.clipPath.indexOf("inset(50%)") > -1) {
+      return true;
+    }
+    if (el.getAttribute && el.getAttribute("aria-hidden") === "true") {
+      return true;
+    }
+    var cls = typeof el.className === "string" ? el.className : "";
+    if (/(^|[\s_-])(sr-only|sr|screen-reader|screen-reader-text|elementor-screen-only|visually-hidden|a11y-hidden)($|[\s_-])/i.test(cls)) {
+      return true;
+    }
+    return false;
+  }
+
   function hasOverflowHiddenAncestor(el) {
     var cur = el.parentElement;
     while (cur && cur !== document.body && cur !== document.documentElement) {
@@ -2057,6 +2085,7 @@
 
         var cs = window.getComputedStyle(el);
         if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) continue;
+        if (tag !== "img" && isScreenReaderOrVisuallyHidden(el, r, cs)) continue;
 
         var sel = getSelector(el, false);
         var diag = null;
@@ -2269,6 +2298,7 @@
         if (r.width < 2 || r.height < 2) continue;
         var cs = window.getComputedStyle(el);
         if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) continue;
+        if (tag !== "img" && isScreenReaderOrVisuallyHidden(el, r, cs)) continue;
 
         var bg = cs.backgroundColor !== "rgba(0, 0, 0, 0)" ? cs.backgroundColor : "";
         var bCol = (parseFloat(cs.borderTopWidth) > 0 && cs.borderTopColor !== "rgba(0, 0, 0, 0)") ? cs.borderTopColor : "";
@@ -2391,7 +2421,7 @@
         if (t === "script" || t === "style" || t === "link" || t === "noscript" || el === overlayEl) continue;
         if (el.classList && el.classList.contains("__rv_audit_marker")) continue;
         var cs = window.getComputedStyle(el);
-        if (cs.display === "none") continue;
+        if (cs.display === "none" || isScreenReaderOrVisuallyHidden(el, null, cs)) continue;
         roots.push(getSelector(el, false));
       }
 
@@ -2400,6 +2430,12 @@
       for (var k = 0; k < links.length && sheets.length < 12; k++) {
         var href = links[k].getAttribute("href") || "";
         if (href) {
+          if (href.indexOf("/proxy?") > -1) {
+            try {
+              var uParam = new URL(href, ORIGIN).searchParams.get("url");
+              if (uParam) href = uParam;
+            } catch (_e) {}
+          }
           var cleanHref = href.split("?")[0].split("/").slice(-2).join("/");
           sheets.push(cleanHref);
         }
