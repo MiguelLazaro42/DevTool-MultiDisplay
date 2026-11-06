@@ -1509,6 +1509,30 @@ body.is-traffic-standalone #traffic-resizer-top {
   display: none;
 }
 
+.device-menu-secondary-bar {
+  padding: 4px 6px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #E3E8E5;
+}
+.device-menu-secondary-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid #0284c7;
+  border-radius: 7px;
+  background: #F0F9FF;
+  color: #0369A1;
+  font: 600 12px/1.2 var(--font-ui);
+  cursor: pointer;
+}
+.device-menu-secondary-btn:hover {
+  background: #0284c7;
+  color: #fff;
+}
+
 .device-menu-heading-row {
   display: flex;
   align-items: center;

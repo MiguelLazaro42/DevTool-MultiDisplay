@@ -50,6 +50,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CERTS_DIR = os.path.join(BASE_DIR, ".certs")
 ACTIVE_PEM_PATH = os.path.join(CERTS_DIR, "active_client_cert.pem")
 ACTIVE_META_PATH = os.path.join(CERTS_DIR, "active_cert.json")
+WORKSPACE_STATE_PATH = os.path.join(CERTS_DIR, "workspace_state.json")
+
+_workspace_lock = threading.Lock()
+_workspace_state = {
+    "main_devices": [],
+    "secondary_devices": [],
+    "url": "",
+    "sync": True,
+    "zoom_mode": "fill",
+    "stack_mode": "auto",
+}
 
 _cert_lock = threading.Lock()
 _cert_state = {
@@ -264,7 +275,73 @@ def get_public_cert_state():
         }
 
 
+def load_persisted_workspace():
+    """Carga el estado persistente del espacio de trabajo (dispositivos en pantalla principal y secundaria/vertical)."""
+    if not os.path.isfile(WORKSPACE_STATE_PATH):
+        return
+    try:
+        with open(WORKSPACE_STATE_PATH, encoding="utf-8") as wf:
+            data = json.load(wf)
+        if not isinstance(data, dict):
+            return
+        with _workspace_lock:
+            if isinstance(data.get("main_devices"), list):
+                _workspace_state["main_devices"] = [
+                    d for d in data["main_devices"] if isinstance(d, str) and d in DEVICES_BY_ID
+                ]
+            if isinstance(data.get("secondary_devices"), list):
+                _workspace_state["secondary_devices"] = [
+                    d for d in data["secondary_devices"] if isinstance(d, str) and d in DEVICES_BY_ID
+                ]
+            if isinstance(data.get("url"), str):
+                _workspace_state["url"] = data["url"][:1000]
+            if isinstance(data.get("sync"), bool):
+                _workspace_state["sync"] = data["sync"]
+            if data.get("zoom_mode") in ("fit", "fill") or isinstance(data.get("zoom_mode"), (int, float)):
+                _workspace_state["zoom_mode"] = data["zoom_mode"]
+            if data.get("stack_mode") in ("auto", "stack"):
+                _workspace_state["stack_mode"] = data["stack_mode"]
+    except Exception:
+        pass
+
+
+def save_persisted_workspace(updates):
+    if not isinstance(updates, dict):
+        return get_workspace_state()
+    os.makedirs(CERTS_DIR, exist_ok=True)
+    with _workspace_lock:
+        if isinstance(updates.get("main_devices"), list):
+            _workspace_state["main_devices"] = [
+                d for d in updates["main_devices"] if isinstance(d, str) and d in DEVICES_BY_ID
+            ]
+        if isinstance(updates.get("secondary_devices"), list):
+            _workspace_state["secondary_devices"] = [
+                d for d in updates["secondary_devices"] if isinstance(d, str) and d in DEVICES_BY_ID
+            ]
+        if isinstance(updates.get("url"), str):
+            _workspace_state["url"] = updates["url"][:1000]
+        if isinstance(updates.get("sync"), bool):
+            _workspace_state["sync"] = updates["sync"]
+        if updates.get("zoom_mode") in ("fit", "fill") or isinstance(updates.get("zoom_mode"), (int, float)):
+            _workspace_state["zoom_mode"] = updates["zoom_mode"]
+        if updates.get("stack_mode") in ("auto", "stack"):
+            _workspace_state["stack_mode"] = updates["stack_mode"]
+        snapshot = dict(_workspace_state)
+        try:
+            with open(WORKSPACE_STATE_PATH, "w", encoding="utf-8") as wf:
+                json.dump(snapshot, wf, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return snapshot
+
+
+def get_workspace_state():
+    with _workspace_lock:
+        return dict(_workspace_state)
+
+
 load_persisted_certificate()
+load_persisted_workspace()
 
 # Una sesión de requests (con su propio jar de cookies) por pantalla.
 _sessions = {}
@@ -725,7 +802,10 @@ def index():
         if proxied_resp is not None:
             return proxied_resp
     return render_template(
-        "index.html", devices=DEVICES, default_device_ids=DEFAULT_DEVICE_IDS
+        "index.html",
+        devices=DEVICES,
+        default_device_ids=DEFAULT_DEVICE_IDS,
+        workspace=get_workspace_state(),
     )
 
 
@@ -922,12 +1002,19 @@ def reset():
         _inspected_by_device.clear()
 
     resp = jsonify({"ok": True, "cleared_sessions": cleared})
-    resp.headers["Clear-Site-Data"] = '"cache", "cookies"'
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    # Respaldo para navegadores que ignoran Clear-Site-Data.
     for name in request.cookies:
         resp.delete_cookie(name)
     return resp
+
+
+@app.route("/api/workspace", methods=["GET", "POST"])
+def api_workspace():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        state = save_persisted_workspace(payload)
+        return jsonify({"ok": True, "workspace": state})
+    return jsonify({"ok": True, "workspace": get_workspace_state()})
 
 
 @app.route("/api/traffic", methods=["GET"])

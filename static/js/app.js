@@ -9,6 +9,11 @@
   // ---------- Datos ----------
   var CATALOG = JSON.parse(document.getElementById("devices-data").textContent);
   var DEFAULTS = JSON.parse(document.getElementById("defaults-data").textContent);
+  var WORKSPACE = {};
+  try {
+    var wsEl = document.getElementById("workspace-data");
+    if (wsEl && wsEl.textContent) WORKSPACE = JSON.parse(wsEl.textContent) || {};
+  } catch (_e) {}
   var BY_ID = {};
   CATALOG.forEach(function (d) { BY_ID[d.id] = d; });
 
@@ -28,7 +33,7 @@
   var IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   var MOD = IS_MAC ? "⌘" : "Ctrl";
 
-  var STORE_URL = "rv.url", STORE_DEVICES = "rv.devices", STORE_ZOOM = "rv.zoom", STORE_SYNC = "rv.sync";
+  var STORE_URL = "rv.url", STORE_DEVICES = "rv.devices", STORE_DEVICES_SECONDARY = "rv.devices.secondary", STORE_ZOOM = "rv.zoom", STORE_SYNC = "rv.sync";
 
   // Estado
   var state = {
@@ -241,7 +246,11 @@
   // Canal de sincronización entre múltiples pestañas / monitores (BroadcastChannel)
   var TAB_ID = "tab_" + Math.random().toString(36).slice(2, 9);
   var SESSION_DEVICES = "rv.tab.devices";
+  var SESSION_SLOT = "rv.tab.slot";
   var syncChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("rv_multidisplay_sync") : null;
+  var initParams = new URLSearchParams(location.search);
+  var userModifiedDevicesInTab = false;
+  var popoutAckCallbacks = {};
 
   function postCrossTab(msg) {
     if (!syncChannel) return;
@@ -263,6 +272,110 @@
   }
   function loadTabDevices() {
     try { var v = sessionStorage.getItem(SESSION_DEVICES); return v ? JSON.parse(v) : null; } catch (_e) { return null; }
+  }
+
+  function filterValidDevices(list) {
+    if (!Array.isArray(list)) return [];
+    var seen = {};
+    var res = [];
+    list.forEach(function (id) {
+      if (BY_ID[id] && !seen[id]) {
+        seen[id] = true;
+        res.push(id);
+      }
+    });
+    return res;
+  }
+
+  function getSavedMainDevices() {
+    var loc = filterValidDevices(load(STORE_DEVICES));
+    if (loc.length) return loc;
+    return filterValidDevices(WORKSPACE && WORKSPACE.main_devices);
+  }
+
+  function getSavedSecondaryDevices() {
+    var loc = filterValidDevices(load(STORE_DEVICES_SECONDARY));
+    if (loc.length) return loc;
+    return filterValidDevices(WORKSPACE && WORKSPACE.secondary_devices);
+  }
+
+  function isPortraitEnvironment() {
+    var scr = window.screen;
+    var screenPortrait = scr && scr.availHeight && scr.availWidth && scr.availHeight > scr.availWidth;
+    var winPortrait = window.innerHeight > window.innerWidth * 1.05;
+    return !!(screenPortrait || winPortrait);
+  }
+
+  function detectInitialWindowSlot() {
+    if (initParams.get("win") === "secondary" || initParams.has("devices") || window.name === "rv_secondary_window") {
+      try { sessionStorage.setItem(SESSION_SLOT, "secondary"); } catch (_e) {}
+      return "secondary";
+    }
+    try {
+      var savedSlot = sessionStorage.getItem(SESSION_SLOT);
+      if (savedSlot === "secondary" || savedSlot === "main") return savedSlot;
+    } catch (_e) {}
+    if (isPortraitEnvironment()) {
+      try { sessionStorage.setItem(SESSION_SLOT, "secondary"); } catch (_e) {}
+      return "secondary";
+    }
+    return "main";
+  }
+
+  var windowSlot = detectInitialWindowSlot();
+
+  function syncUrlParamsWithState() {
+    if (initParams.get("mode") === "traffic") return;
+    var curParams = new URLSearchParams(location.search);
+    if (windowSlot === "secondary" || curParams.has("devices") || curParams.has("win")) {
+      var u = new URL(location.href);
+      u.searchParams.set("win", "secondary");
+      if (state.active.length) {
+        u.searchParams.set("devices", state.active.join(","));
+      } else {
+        u.searchParams.delete("devices");
+      }
+      if (state.url) {
+        u.searchParams.set("url", state.url);
+      }
+      try {
+        window.history.replaceState(null, "", u.pathname + u.search + u.hash);
+      } catch (_e) {}
+    }
+  }
+
+  function persistWorkspaceToServer(extra) {
+    var payload = extra ? Object.assign({}, extra) : {};
+    if (windowSlot === "secondary") {
+      payload.secondary_devices = state.active.slice();
+      if (WORKSPACE) WORKSPACE.secondary_devices = state.active.slice();
+    } else {
+      payload.main_devices = state.active.slice();
+      if (WORKSPACE) WORKSPACE.main_devices = state.active.slice();
+    }
+    if (state.url) payload.url = state.url;
+    payload.sync = !!state.sync;
+    fetch("/api/workspace", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).catch(function () {});
+  }
+
+  var updateSecondaryMenuBar = function () {};
+
+  function saveActiveDevices() {
+    storeTabDevices(state.active);
+    if (windowSlot === "secondary") {
+      store(STORE_DEVICES_SECONDARY, state.active);
+      postCrossTab({ type: "bc:secondary_devices_updated", devices: state.active.slice() });
+    } else {
+      store(STORE_DEVICES, state.active);
+    }
+    syncUrlParamsWithState();
+    persistWorkspaceToServer();
+    updateSecondaryMenuBar();
   }
 
   var toastTimer;
@@ -415,17 +528,70 @@
     return els[id];
   }
 
-  function popoutDevices(deviceIds, removeFromCurrent) {
-    if (!deviceIds || !deviceIds.length) return;
-    var u = new URL(location.origin + "/");
-    u.searchParams.set("devices", deviceIds.join(","));
-    if (state.url) u.searchParams.set("url", state.url);
-    window.open(u.href, "_blank");
-    if (removeFromCurrent && state.active.length > deviceIds.length) {
-      deviceIds.forEach(function (id) {
+  var openSecondaryTabs = {};
+
+  function replaceActiveDevicesList(nextIds) {
+    var clean = filterValidDevices(nextIds);
+    if (!clean.length) return;
+    state.active.slice().forEach(function (id) {
+      if (clean.indexOf(id) === -1) {
+        state.active.splice(state.active.indexOf(id), 1);
+        if (els[id] && els[id].root) els[id].root.remove();
+        delete els[id];
+        delete state.frameUrls[id];
+      }
+    });
+    clean.forEach(function (id) {
+      if (state.active.indexOf(id) === -1) {
+        state.active.push(id);
+        createDevice(id);
+        if (state.url) navigateFrame(id, state.url);
+      }
+    });
+    saveActiveDevices();
+    syncMenu();
+    layout();
+  }
+
+  function popoutDevices(deviceIds, removeFromCurrent, replaceSecondary) {
+    var cleanIds = filterValidDevices(deviceIds);
+    if (!cleanIds.length) return;
+
+    var existingSec = getSavedSecondaryDevices();
+    var targetSecIds = replaceSecondary
+      ? cleanIds
+      : filterValidDevices(existingSec.concat(cleanIds));
+
+    store(STORE_DEVICES_SECONDARY, targetSecIds);
+    if (WORKSPACE) WORKSPACE.secondary_devices = targetSecIds.slice();
+    fetch("/api/workspace", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secondary_devices: targetSecIds, url: state.url || "" })
+    }).catch(function () {});
+
+    var hasOpenSecondary = Object.keys(openSecondaryTabs).length > 0;
+    if (hasOpenSecondary) {
+      postCrossTab({
+        type: "bc:popout_add",
+        devices: targetSecIds,
+        url: state.url || ""
+      });
+    } else {
+      var u = new URL(location.origin + "/");
+      u.searchParams.set("win", "secondary");
+      u.searchParams.set("devices", targetSecIds.join(","));
+      if (state.url) u.searchParams.set("url", state.url);
+      window.open(u.href, "_blank");
+    }
+
+    if (removeFromCurrent && state.active.length > cleanIds.length) {
+      cleanIds.forEach(function (id) {
         if (state.active.indexOf(id) > -1) toggleDevice(id, false);
       });
     }
+    updateSecondaryMenuBar();
   }
 
   function translateDevice(id) {
@@ -458,6 +624,7 @@
   function toggleDevice(id, on) {
     var has = state.active.indexOf(id) > -1;
     if (on === undefined) on = !has;
+    userModifiedDevicesInTab = true;
     if (on && !has) {
       state.active.push(id);
       createDevice(id);
@@ -468,8 +635,7 @@
       delete els[id];
       delete state.frameUrls[id];
     }
-    store(STORE_DEVICES, state.active);
-    storeTabDevices(state.active);
+    saveActiveDevices();
     syncMenu();
     layout();
   }
@@ -574,6 +740,19 @@
   }
 
   function layout() {
+    // Si una ventana nueva (sin cambios manuales aún) se arrastra a un monitor vertical
+    // y existen dispositivos guardados para la 2da pantalla/vertical, restaurarlos automáticamente.
+    if (windowSlot === "main" && !userModifiedDevicesInTab && isPortraitEnvironment()) {
+      var savedSec = getSavedSecondaryDevices();
+      if (savedSec.length) {
+        windowSlot = "secondary";
+        try { sessionStorage.setItem(SESSION_SLOT, "secondary"); } catch (_e) {}
+        postCrossTab({ type: "bc:secondary_alive" });
+        replaceActiveDevicesList(savedSec);
+        return;
+      }
+    }
+
     var n = state.active.length;
     matEmpty.hidden = n > 0;
     var viewportW = document.documentElement.clientWidth || window.innerWidth || stage.clientWidth;
@@ -1113,6 +1292,8 @@
     state.url = url;
     state.frameUrls = {};
     store(STORE_URL, url);
+    syncUrlParamsWithState();
+    persistWorkspaceToServer({ url: url });
     if (!state.active.length) toast(t("toastNoDevices"));
     state.active.forEach(function (id) { navigateFrame(id, url); });
     if (state.sync) {
@@ -1415,6 +1596,38 @@
       var msg = ev.data;
       if (!msg || msg.tabId === TAB_ID) return;
 
+      if (msg.type === "bc:who_is_secondary") {
+        if (windowSlot === "secondary") {
+          postCrossTab({ type: "bc:secondary_alive" });
+        }
+        return;
+      }
+      if (msg.type === "bc:secondary_alive") {
+        openSecondaryTabs[msg.tabId] = true;
+        return;
+      }
+      if (msg.type === "bc:secondary_closed") {
+        delete openSecondaryTabs[msg.tabId];
+        return;
+      }
+      if (msg.type === "bc:secondary_devices_updated" && Array.isArray(msg.devices)) {
+        if (WORKSPACE) WORKSPACE.secondary_devices = msg.devices.slice();
+        updateSecondaryMenuBar();
+        return;
+      }
+      if (msg.type === "bc:popout_add" && windowSlot === "secondary" && Array.isArray(msg.devices)) {
+        if (msg.url && msg.url !== state.url) {
+          state.url = msg.url;
+          input.value = msg.url;
+          state.frameUrls = {};
+        }
+        var merged = filterValidDevices(state.active.concat(msg.devices));
+        if (merged.length) {
+          userModifiedDevicesInTab = true;
+          replaceActiveDevicesList(merged);
+        }
+        return;
+      }
       if (msg.type === "bc:traffic_ping") {
         fetchTraffic();
         return;
@@ -4562,7 +4775,43 @@
   fetchCertStatus();
 
   // ---------- Menú Agregar dispositivo ----------
+  var secondaryBarWrap = null;
+  var secondaryBarBtn = null;
+
+  updateSecondaryMenuBar = function () {
+    if (!secondaryBarWrap || !secondaryBarBtn) return;
+    if (windowSlot === "secondary") {
+      secondaryBarWrap.hidden = true;
+      return;
+    }
+    var secIds = getSavedSecondaryDevices();
+    if (!secIds.length) {
+      secondaryBarWrap.hidden = true;
+      return;
+    }
+    secondaryBarWrap.hidden = false;
+    secondaryBarBtn.textContent = t("openSecondaryScreen", { n: secIds.length });
+  };
+
   function buildMenu() {
+    secondaryBarWrap = document.createElement("div");
+    secondaryBarWrap.className = "device-menu-secondary-bar";
+    secondaryBarWrap.hidden = true;
+
+    secondaryBarBtn = document.createElement("button");
+    secondaryBarBtn.type = "button";
+    secondaryBarBtn.className = "device-menu-secondary-btn";
+    secondaryBarBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      var secIds = getSavedSecondaryDevices();
+      closeMenu(false);
+      if (secIds.length) {
+        popoutDevices(secIds, false, true);
+      }
+    });
+    secondaryBarWrap.appendChild(secondaryBarBtn);
+    menu.appendChild(secondaryBarWrap);
+
     var groups = [];
     var byGroup = {};
     CATALOG.forEach(function (d) {
@@ -4595,7 +4844,7 @@
         ev.stopPropagation();
         var ids = byGroup[g].map(function (d) { return d.id; });
         closeMenu(false);
-        popoutDevices(ids, true);
+        popoutDevices(ids, true, true);
       });
 
       headingRow.appendChild(heading);
@@ -4696,6 +4945,7 @@
       if (!I18N.setLang(b.dataset.lang)) return;   // también traduce el HTML y el menú
       state.active.forEach(translateDevice);
       updateZoomUI();
+      updateSecondaryMenuBar();
       syncLangSwitch();
     });
   });
@@ -4721,20 +4971,44 @@
     return;
   }
 
-  var tabSaved = loadTabDevices();
-  var saved = paramDevices
-    ? paramDevices.split(",")
-    : (Array.isArray(tabSaved) && tabSaved.length ? tabSaved : load(STORE_DEVICES));
-  var initial = (Array.isArray(saved) ? saved : DEFAULTS).filter(function (id) { return BY_ID[id]; });
-  if (!Array.isArray(saved) || (saved.length && !initial.length)) initial = DEFAULTS.slice();
-  storeTabDevices(initial);
+  if (windowSlot === "secondary") {
+    postCrossTab({ type: "bc:secondary_alive" });
+    window.addEventListener("beforeunload", function () {
+      postCrossTab({ type: "bc:secondary_closed" });
+    });
+  } else {
+    postCrossTab({ type: "bc:who_is_secondary" });
+  }
+
+  var tabSaved = filterValidDevices(loadTabDevices());
+  var saved;
+  if (tabSaved.length) {
+    // 1. Si esta pestaña ya tenía dispositivos activos en esta sesión (p. ej. al dar F5 / Cmd+R), conservarlos siempre.
+    saved = tabSaved;
+  } else if (paramDevices) {
+    // 2. Si es una ventana recién abierta con ?devices=..., usar esos dispositivos.
+    saved = filterValidDevices(paramDevices.split(","));
+  } else if (windowSlot === "secondary") {
+    // 3. Si es la 2da ventana o monitor vertical, restaurar sus dispositivos guardados (localStorage o servidor).
+    saved = getSavedSecondaryDevices();
+    if (!saved.length) saved = getSavedMainDevices();
+  } else {
+    // 4. Ventana principal: restaurar sus dispositivos guardados (localStorage o servidor).
+    saved = getSavedMainDevices();
+  }
+
+  var initial = (Array.isArray(saved) && saved.length) ? saved : DEFAULTS.slice();
   initial.forEach(function (id) { state.active.push(id); createDevice(id); });
+  saveActiveDevices();
   syncMenu();
 
-  var savedUrl = paramUrl ? normalizeUrl(paramUrl) : load(STORE_URL);
+  var serverUrl = (WORKSPACE && typeof WORKSPACE.url === "string" && WORKSPACE.url) ? WORKSPACE.url : "";
+  var savedUrl = paramUrl ? normalizeUrl(paramUrl) : (load(STORE_URL) || serverUrl);
   if (typeof savedUrl === "string" && savedUrl) {
     state.url = savedUrl;
     input.value = savedUrl;
+    store(STORE_URL, savedUrl);
+    syncUrlParamsWithState();
     state.active.forEach(function (id) { navigateFrame(id, savedUrl); });
   }
 
