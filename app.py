@@ -57,10 +57,18 @@ _workspace_state = {
     "main_devices": [],
     "secondary_devices": [],
     "url": "",
+    "tabs": [],
+    "active_tab_id": "tab-1",
     "sync": True,
+    "inspector": False,
     "zoom_mode": "fill",
     "stack_mode": "auto",
 }
+
+_sync_bus_lock = threading.Lock()
+_sync_bus_seq = 0
+_sync_bus_events = []
+MAX_SYNC_BUS_EVENTS = 250
 
 _cert_lock = threading.Lock()
 _cert_state = {
@@ -295,8 +303,24 @@ def load_persisted_workspace():
                 ]
             if isinstance(data.get("url"), str):
                 _workspace_state["url"] = data["url"][:1000]
+            if isinstance(data.get("tabs"), list):
+                clean_tabs = []
+                for idx, tb in enumerate(data["tabs"][:20]):
+                    if isinstance(tb, dict) and isinstance(tb.get("id"), str):
+                        clean_tabs.append({
+                            "id": tb["id"][:40],
+                            "num": idx + 1,
+                            "url": str(tb.get("url") or "")[:1000],
+                            "title": str(tb.get("title") or "")[:120],
+                        })
+                if clean_tabs:
+                    _workspace_state["tabs"] = clean_tabs
+            if isinstance(data.get("active_tab_id"), str) and data["active_tab_id"]:
+                _workspace_state["active_tab_id"] = data["active_tab_id"][:40]
             if isinstance(data.get("sync"), bool):
                 _workspace_state["sync"] = data["sync"]
+            if isinstance(data.get("inspector"), bool):
+                _workspace_state["inspector"] = data["inspector"]
             if data.get("zoom_mode") in ("fit", "fill") or isinstance(data.get("zoom_mode"), (int, float)):
                 _workspace_state["zoom_mode"] = data["zoom_mode"]
             if data.get("stack_mode") in ("auto", "stack"):
@@ -320,8 +344,24 @@ def save_persisted_workspace(updates):
             ]
         if isinstance(updates.get("url"), str):
             _workspace_state["url"] = updates["url"][:1000]
+        if isinstance(updates.get("tabs"), list):
+            clean_tabs = []
+            for idx, tb in enumerate(updates["tabs"][:20]):
+                if isinstance(tb, dict) and isinstance(tb.get("id"), str):
+                    clean_tabs.append({
+                        "id": tb["id"][:40],
+                        "num": idx + 1,
+                        "url": str(tb.get("url") or "")[:1000],
+                        "title": str(tb.get("title") or "")[:120],
+                    })
+            if clean_tabs:
+                _workspace_state["tabs"] = clean_tabs
+        if isinstance(updates.get("active_tab_id"), str) and updates["active_tab_id"]:
+            _workspace_state["active_tab_id"] = updates["active_tab_id"][:40]
         if isinstance(updates.get("sync"), bool):
             _workspace_state["sync"] = updates["sync"]
+        if isinstance(updates.get("inspector"), bool):
+            _workspace_state["inspector"] = updates["inspector"]
         if updates.get("zoom_mode") in ("fit", "fill") or isinstance(updates.get("zoom_mode"), (int, float)):
             _workspace_state["zoom_mode"] = updates["zoom_mode"]
         if updates.get("stack_mode") in ("auto", "stack"):
@@ -1038,6 +1078,46 @@ def api_workspace():
     return jsonify({"ok": True, "workspace": get_workspace_state()})
 
 
+@app.route("/api/sync-bus", methods=["GET", "POST"])
+def api_sync_bus():
+    global _sync_bus_seq
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict) or not payload.get("type"):
+            return jsonify({"ok": False}), 400
+        with _sync_bus_lock:
+            _sync_bus_seq += 1
+            seq = _sync_bus_seq
+            _sync_bus_events.append({
+                "seq": seq,
+                "tab_id": str(payload.get("tabId") or ""),
+                "msg": payload,
+                "ts": time.time(),
+            })
+            if len(_sync_bus_events) > MAX_SYNC_BUS_EVENTS:
+                del _sync_bus_events[:-MAX_SYNC_BUS_EVENTS]
+        return jsonify({"ok": True, "seq": seq})
+
+    since = request.args.get("since", -1, type=int)
+    tab_id = request.args.get("tab_id", "", type=str)
+    with _sync_bus_lock:
+        cur_seq = _sync_bus_seq
+        if since < 0:
+            events = []
+        else:
+            events = [
+                e["msg"]
+                for e in _sync_bus_events
+                if e["seq"] > since and (not tab_id or e.get("tab_id") != tab_id)
+            ]
+    return jsonify({
+        "ok": True,
+        "seq": cur_seq,
+        "events": events,
+        "workspace": get_workspace_state(),
+    })
+
+
 @app.route("/api/traffic", methods=["GET"])
 def api_traffic():
     since = request.args.get("since", 0, type=int)
@@ -1485,7 +1565,7 @@ def main():
         logging.getLogger("werkzeug").setLevel(logging.ERROR)
         flask_cli.show_server_banner = lambda *a, **k: None
 
-    app.run(host="127.0.0.1", port=port, debug=args.debug)
+    app.run(host="127.0.0.1", port=port, debug=args.debug, threaded=True)
 
 
 if __name__ == "__main__":

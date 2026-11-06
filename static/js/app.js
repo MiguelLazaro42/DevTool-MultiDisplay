@@ -250,21 +250,70 @@
     return getDeviceTier(deviceId) === "mobile" ? "MÓVIL" : "DESKTOP";
   }
 
-  // Canal de sincronización entre múltiples pestañas / monitores (BroadcastChannel)
+  // Canal de sincronización entre múltiples pestañas / monitores (BroadcastChannel + localStorage + Server Sync Bus)
   var TAB_ID = "tab_" + Math.random().toString(36).slice(2, 9);
   var SESSION_DEVICES = "rv.tab.devices";
   var SESSION_SLOT = "rv.tab.slot";
+  var STORE_TABS = "rv.tabs";
+  var CROSS_BUS_STORAGE_KEY = "rv.cross_tab_bus";
   var syncChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("rv_multidisplay_sync") : null;
   var initParams = new URLSearchParams(location.search);
   var userModifiedDevicesInTab = false;
   var popoutAckCallbacks = {};
+  var crossMsgSeq = 0;
+  var seenCrossTabMsgs = {};
+  var serverSyncSeq = -1;
+  var lastScrollBusPostAt = 0;
+
+  var SERVER_BUS_SKIP_TYPES = {
+    "bc:who_is_secondary": true,
+    "bc:secondary_alive": true,
+    "bc:secondary_closed": true,
+    "bc:window_snapshot_response": true,
+    "bc:traffic_ping": true,
+    "bc:console_ping": true,
+    "bc:audit_ping": true,
+    "bc:flow_ping": true,
+    "bc:storage_ping": true,
+    "bc:templates_ping": true
+  };
 
   function postCrossTab(msg) {
-    if (!syncChannel) return;
+    if (!msg || typeof msg !== "object") return;
+    msg.tabId = TAB_ID;
+    if (!msg.msgId) {
+      msg.msgId = TAB_ID + "_" + (++crossMsgSeq) + "_" + Date.now();
+    }
+    seenCrossTabMsgs[msg.msgId] = true;
+
+    // 1. BroadcastChannel nativo (0ms en mismo origen)
+    if (syncChannel) {
+      try {
+        syncChannel.postMessage(msg);
+      } catch (_e) {}
+    }
+
+    // 2. Evento storage en localStorage (0ms respaldo entre ventanas del mismo origen)
     try {
-      msg.tabId = TAB_ID;
-      syncChannel.postMessage(msg);
+      localStorage.setItem(CROSS_BUS_STORAGE_KEY, JSON.stringify(msg));
     } catch (_e) {}
+
+    // 3. Bus en el servidor Flask (/api/sync-bus) para cruzar localhost vs 127.0.0.1 o perfiles distintos
+    if (!SERVER_BUS_SKIP_TYPES[msg.type]) {
+      var now = Date.now();
+      if (msg.type === "bc:sync_scroll" || msg.type === "bc:sync_drag") {
+        if (msg.payload && msg.payload.phase !== "end" && (now - lastScrollBusPostAt) < 65) {
+          return;
+        }
+        lastScrollBusPostAt = now;
+      }
+      fetch("/api/sync-bus", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(msg)
+      }).catch(function () {});
+    }
   }
 
   // ---------- Utilidades ----------
@@ -362,6 +411,18 @@
     }
     if (state.url) payload.url = state.url;
     payload.sync = !!state.sync;
+    payload.inspector = !!state.inspector;
+    if (Array.isArray(state.tabs) && state.tabs.length) {
+      payload.tabs = state.tabs.map(function (tb, idx) {
+        return {
+          id: tb.id,
+          num: idx + 1,
+          url: tb.url || "",
+          title: tb.title || ""
+        };
+      });
+      payload.active_tab_id = state.activeTabId || "tab-1";
+    }
     fetch("/api/workspace", {
       method: "POST",
       credentials: "same-origin",
@@ -568,11 +629,126 @@
     for (var i = 0; i < state.tabs.length; i++) {
       if (state.tabs[i].id === tabId) return state.tabs[i];
     }
-    return state.tabs[0] || null;
+    return null;
   }
 
   function getActiveVirtualTab() {
-    return getVirtualTabById(state.activeTabId);
+    return getVirtualTabById(state.activeTabId) || state.tabs[0] || null;
+  }
+
+  function postToAllDeviceTabIframes(payload) {
+    state.active.forEach(function (id) {
+      var e = els[id];
+      if (!e) return;
+      if (e.tabIframes) {
+        Object.keys(e.tabIframes).forEach(function (k) {
+          var ifr = e.tabIframes[k];
+          if (ifr && ifr.contentWindow) {
+            try { ifr.contentWindow.postMessage(payload, location.origin); } catch (_e) {}
+          }
+        });
+      } else if (e.iframe && e.iframe.contentWindow) {
+        try { e.iframe.contentWindow.postMessage(payload, location.origin); } catch (_e) {}
+      }
+    });
+  }
+
+  function serializeVirtualTabs() {
+    return state.tabs.map(function (tb, idx) {
+      return {
+        id: tb.id,
+        num: idx + 1,
+        url: tb.url || "",
+        title: tb.title || ""
+      };
+    });
+  }
+
+  function saveVirtualTabsLocally() {
+    store(STORE_TABS, {
+      tabs: serializeVirtualTabs(),
+      activeTabId: state.activeTabId || "tab-1"
+    });
+  }
+
+  function syncTabsStateAcrossWindows(fromCrossTab) {
+    saveVirtualTabsLocally();
+    if (fromCrossTab) return;
+    var tabsPayload = serializeVirtualTabs();
+    persistWorkspaceToServer({
+      tabs: tabsPayload,
+      active_tab_id: state.activeTabId,
+      url: state.url || ""
+    });
+    postCrossTab({
+      type: "bc:sync_tabs_state",
+      tabs: tabsPayload,
+      activeTabId: state.activeTabId
+    });
+  }
+
+  function applyRemoteTabsState(remoteTabs, remoteActiveTabId) {
+    if (!Array.isArray(remoteTabs) || !remoteTabs.length) return;
+    var remoteMap = {};
+    remoteTabs.forEach(function (rt) {
+      if (rt && rt.id) remoteMap[rt.id] = rt;
+    });
+
+    // 1. Quitar iframes de pestañas que se cerraron en la otra ventana
+    state.tabs.forEach(function (oldTb) {
+      if (!remoteMap[oldTb.id]) {
+        state.active.forEach(function (devId) {
+          var e = els[devId];
+          if (e && e.tabIframes && e.tabIframes[oldTb.id]) {
+            e.tabIframes[oldTb.id].remove();
+            delete e.tabIframes[oldTb.id];
+          }
+        });
+      }
+    });
+
+    // 2. Actualizar o crear las pestañas remotas
+    var nextTabs = [];
+    remoteTabs.forEach(function (rt, idx) {
+      if (!rt || !rt.id) return;
+      var seqNum = parseInt(String(rt.id).replace("tab-", ""), 10);
+      if (!isNaN(seqNum) && seqNum >= nextVirtualTabSeq) {
+        nextVirtualTabSeq = seqNum + 1;
+      }
+      var existing = getVirtualTabById(rt.id);
+      if (existing) {
+        var urlChanged = !!(rt.url && rt.url !== existing.url);
+        existing.num = idx + 1;
+        if (rt.title) existing.title = rt.title;
+        if (urlChanged) {
+          existing.url = rt.url;
+          existing.frameUrls = {};
+          state.active.forEach(function (devId) {
+            navigateFrame(devId, rt.url, false, existing.id);
+          });
+        }
+        nextTabs.push(existing);
+      } else {
+        var created = {
+          id: rt.id,
+          num: idx + 1,
+          url: rt.url || "",
+          title: rt.title || "",
+          frameUrls: {}
+        };
+        nextTabs.push(created);
+      }
+    });
+
+    if (!nextTabs.length) return;
+    state.tabs = nextTabs;
+
+    var targetActiveId = (remoteActiveTabId && remoteMap[remoteActiveTabId])
+      ? remoteActiveTabId
+      : state.tabs[0].id;
+
+    switchVirtualTab(targetActiveId, true);
+    saveVirtualTabsLocally();
   }
 
   function findTabIdBySourceWindow(deviceId, sourceWin) {
@@ -678,7 +854,7 @@
     if (!targetTab) return;
 
     var prevTab = getActiveVirtualTab();
-    if (prevTab) {
+    if (prevTab && prevTab.id !== targetTab.id) {
       prevTab.url = state.url || prevTab.url || "";
       prevTab.frameUrls = Object.assign({}, prevTab.frameUrls || {}, state.frameUrls || {});
     }
@@ -709,12 +885,20 @@
       } else {
         e.placeholder.hidden = true;
         ifr.hidden = false;
+        try {
+          if (ifr.contentWindow) {
+            ifr.contentWindow.postMessage({ type: "rv:set_sync", active: state.sync }, location.origin);
+            ifr.contentWindow.postMessage({ type: "rv:set_inspector", active: state.inspector }, location.origin);
+            ifr.contentWindow.postMessage({ type: "rv:set_audit_highlight", active: auditState.highlightOnScreens }, location.origin);
+          }
+        } catch (_e) {}
       }
     });
 
     renderVirtualTabs();
+    syncTabsStateAcrossWindows(fromCrossTab);
 
-    if (!fromCrossTab && state.sync) {
+    if (!fromCrossTab) {
       postCrossTab({ type: "bc:switch_tab", tabId: targetTab.id });
     }
   }
@@ -724,10 +908,13 @@
     var cleanUrl = url ? (normalizeUrl(url) || url) : "";
     if (opts.tabId) {
       var existing = getVirtualTabById(opts.tabId);
-      if (existing && existing.id === opts.tabId) {
+      if (existing) {
         if (cleanUrl && existing.url !== cleanUrl) {
           existing.url = cleanUrl;
           existing.frameUrls = {};
+          state.active.forEach(function (id) {
+            navigateFrame(id, cleanUrl, false, existing.id);
+          });
         }
         switchVirtualTab(existing.id, true);
         return existing;
@@ -750,24 +937,20 @@
     state.tabs.push(newTab);
 
     switchVirtualTab(newTab.id, true);
-    if (cleanUrl) {
-      state.active.forEach(function (id) {
-        navigateFrame(id, cleanUrl, false, newTab.id);
-      });
-    }
     renderVirtualTabs();
 
     if (!opts.fromCrossTab) {
       var shortName = formatTabShortTitle(cleanUrl, title) || t("simTabEmpty");
       toast(t("toastNewTabOpened", { num: newTab.num, title: shortName }));
-      if (state.sync) {
-        postCrossTab({
-          type: "bc:open_tab",
-          tabId: newTab.id,
-          url: cleanUrl,
-          title: newTab.title
-        });
-      }
+      syncTabsStateAcrossWindows(false);
+      postCrossTab({
+        type: "bc:open_tab",
+        tabId: newTab.id,
+        url: cleanUrl,
+        title: newTab.title
+      });
+    } else {
+      saveVirtualTabsLocally();
     }
     return newTab;
   }
@@ -799,7 +982,8 @@
       renderVirtualTabs();
     }
 
-    if (!fromCrossTab && state.sync) {
+    syncTabsStateAcrossWindows(fromCrossTab);
+    if (!fromCrossTab) {
       postCrossTab({ type: "bc:close_tab", tabId: tabId });
     }
   }
@@ -1609,13 +1793,11 @@
     }
     store(STORE_URL, url);
     syncUrlParamsWithState();
-    persistWorkspaceToServer({ url: url });
     if (!state.active.length) toast(t("toastNoDevices"));
     state.active.forEach(function (id) { navigateFrame(id, url); });
     renderVirtualTabs();
-    if (state.sync) {
-      postCrossTab({ type: "bc:load_url", url: url, tabId: state.activeTabId });
-    }
+    syncTabsStateAcrossWindows(false);
+    postCrossTab({ type: "bc:load_url", url: url, tabId: state.activeTabId });
   });
 
   // ---------- Refrescar (borra caché, storage del sitio y cookies) ----------
@@ -1653,6 +1835,49 @@
     }
   }
 
+  function applyLocalReloadAndClear() {
+    clearSiteCacheAndStorage();
+    snapshotImageCache = {};
+    trafficState.items = [];
+    trafficState.lastSeq = 0;
+    trafficState.selectedId = null;
+    consoleState.items = [];
+    consoleState.lastSeq = 0;
+    consoleState.selectedId = null;
+    auditState.items = [];
+    auditState.selectedIdx = -1;
+    flowState.items = [];
+    flowState.lastSeq = 0;
+    flowState.selectedId = null;
+    storageState.serverCookies = [];
+    storageState.byDevice = {};
+    storageState.rows = [];
+    storageState.selectedIdx = -1;
+    templatesByDevice = {};
+    inspectedByTier = { mobile: null, desktop: null };
+    inspectedByDevice = {};
+    lastInspectedElement = null;
+    if (trafficCountEl) trafficCountEl.textContent = "0";
+    if (flowCountEl) flowCountEl.textContent = "0";
+    updateConsoleBadge();
+    updateAuditBadge();
+    renderTrafficTable();
+    renderTrafficDetail();
+    renderConsoleTable();
+    renderConsoleDetail();
+    renderAuditTable();
+    renderAuditDetail();
+    renderFlowTable();
+    renderFlowDetail();
+    renderStorageTable();
+    renderStorageDetail();
+    if (state.url) {
+      state.active.forEach(function (id) {
+        navigateFrame(id, state.frameUrls[id] || state.url, true);
+      });
+    }
+  }
+
   refreshBtn.addEventListener("click", function () {
     if (refreshBtn.disabled) return;
     refreshBtn.disabled = true;
@@ -1664,52 +1889,9 @@
         return r.json();
       })
       .then(function () {
-        clearSiteCacheAndStorage();
-        snapshotImageCache = {};
-        trafficState.items = [];
-        trafficState.lastSeq = 0;
-        trafficState.selectedId = null;
-        consoleState.items = [];
-        consoleState.lastSeq = 0;
-        consoleState.selectedId = null;
-        auditState.items = [];
-        auditState.selectedIdx = -1;
-        flowState.items = [];
-        flowState.lastSeq = 0;
-        flowState.selectedId = null;
-        storageState.serverCookies = [];
-        storageState.byDevice = {};
-        storageState.rows = [];
-        storageState.selectedIdx = -1;
-        templatesByDevice = {};
-        inspectedByTier = { mobile: null, desktop: null };
-        inspectedByDevice = {};
-        lastInspectedElement = null;
-        if (trafficCountEl) trafficCountEl.textContent = "0";
-        if (flowCountEl) flowCountEl.textContent = "0";
-        updateConsoleBadge();
-        updateAuditBadge();
-        renderTrafficTable();
-        renderTrafficDetail();
-        renderConsoleTable();
-        renderConsoleDetail();
-        renderAuditTable();
-        renderAuditDetail();
-        renderFlowTable();
-        renderFlowDetail();
-        renderStorageTable();
-        renderStorageDetail();
-        if (!state.url) {
-          toast(t("toastClearedNoUrl"));
-          return;
-        }
-        state.active.forEach(function (id) {
-          navigateFrame(id, state.frameUrls[id] || state.url, true);
-        });
-        if (state.sync) {
-          postCrossTab({ type: "bc:reload" });
-        }
-        toast(t("toastCleared"));
+        applyLocalReloadAndClear();
+        postCrossTab({ type: "bc:reload" });
+        toast(state.url ? t("toastCleared") : t("toastClearedNoUrl"));
       })
       .catch(function () {
         toast(t("toastResetFailed"));
@@ -1735,6 +1917,26 @@
     });
   }
 
+  function ensureTabDevicesAtUrl(tabId, targetUrl, fromUrl) {
+    if (!targetUrl) return;
+    var tb = getVirtualTabById(tabId);
+    if (!tb) return;
+    tb.url = targetUrl;
+    if (tabId === state.activeTabId) {
+      state.url = targetUrl;
+      if (input && document.activeElement !== input) input.value = targetUrl;
+    }
+    renderVirtualTabs();
+    setTimeout(function () {
+      state.active.forEach(function (id) {
+        var curDevUrl = (tb.frameUrls && tb.frameUrls[id]) || "";
+        if (!curDevUrl || curDevUrl === fromUrl) {
+          navigateFrame(id, targetUrl, false, tabId);
+        }
+      });
+    }, 320);
+  }
+
   window.addEventListener("message", function (ev) {
     if (ev.origin !== location.origin || !ev.data) return;
     var d = ev.data;
@@ -1742,6 +1944,7 @@
       var msgTabId = findTabIdBySourceWindow(d.frame, ev.source);
       var msgTab = getVirtualTabById(msgTabId);
       var prevUrl = msgTab && msgTab.frameUrls ? msgTab.frameUrls[d.frame] : state.frameUrls[d.frame];
+      var urlMoved = !!(prevUrl && d.url && d.url !== prevUrl);
       if (msgTab) {
         if (!msgTab.frameUrls) msgTab.frameUrls = {};
         if (els[d.frame]) msgTab.frameUrls[d.frame] = d.url;
@@ -1756,6 +1959,17 @@
         }
       }
       renderVirtualTabs();
+      saveVirtualTabsLocally();
+      if (urlMoved && state.sync) {
+        ensureTabDevicesAtUrl(msgTabId, d.url, prevUrl);
+        postCrossTab({
+          type: "bc:tab_url_sync",
+          tabId: msgTabId,
+          url: d.url,
+          fromUrl: prevUrl,
+          title: d.title || ""
+        });
+      }
       fetchTraffic();
       postCrossTab({ type: "bc:traffic_ping" });
       if (flowState.recording && d.url && d.url !== prevUrl) {
@@ -1965,195 +2179,313 @@
     }
   });
 
-  // Recepción de eventos sincronizados desde otros monitores / pestañas
+  // Recepción unificada de eventos sincronizados desde otros monitores / pestañas (BroadcastChannel + storage + Server Bus)
+  function handleCrossTabMessage(msg) {
+    if (!msg || typeof msg !== "object" || msg.tabId === TAB_ID) return;
+    if (msg.msgId) {
+      if (seenCrossTabMsgs[msg.msgId]) return;
+      seenCrossTabMsgs[msg.msgId] = true;
+    }
+
+    if (msg.type === "bc:who_is_secondary") {
+      if (windowSlot === "secondary") {
+        postCrossTab({ type: "bc:secondary_alive" });
+      }
+      return;
+    }
+    if (msg.type === "bc:secondary_alive") {
+      openSecondaryTabs[msg.tabId] = true;
+      return;
+    }
+    if (msg.type === "bc:secondary_closed") {
+      delete openSecondaryTabs[msg.tabId];
+      return;
+    }
+    if (msg.type === "bc:secondary_devices_updated" && Array.isArray(msg.devices)) {
+      if (WORKSPACE) WORKSPACE.secondary_devices = msg.devices.slice();
+      updateSecondaryMenuBar();
+      return;
+    }
+    if (msg.type === "bc:popout_add" && windowSlot === "secondary" && Array.isArray(msg.devices)) {
+      if (msg.url && msg.url !== state.url) {
+        state.url = msg.url;
+        input.value = msg.url;
+        state.frameUrls = {};
+      }
+      var merged = filterValidDevices(state.active.concat(msg.devices));
+      if (merged.length) {
+        userModifiedDevicesInTab = true;
+        replaceActiveDevicesList(merged);
+      }
+      return;
+    }
+    if (msg.type === "bc:request_window_snapshot" && msg.requestId) {
+      if (state.active.length && typeof renderLocalWindowSnapshotDataUrl === "function") {
+        renderLocalWindowSnapshotDataUrl().then(function (snapPayload) {
+          if (!snapPayload) return;
+          postCrossTab({
+            type: "bc:window_snapshot_response",
+            requestId: msg.requestId,
+            windowSlot: windowSlot,
+            windowTitle: windowSlot === "secondary" ? "2da Pantalla / Monitor Vertical" : "Pantalla Principal",
+            devices: state.active.map(function (id) {
+              var d = BY_ID[id];
+              return d ? (d.name + " (" + d.width + "×" + d.height + ")") : id;
+            }),
+            deviceCount: state.active.length,
+            width: snapPayload.width,
+            height: snapPayload.height,
+            dataUrl: snapPayload.dataUrl
+          });
+        }).catch(function () {});
+      }
+      return;
+    }
+    if (msg.type === "bc:traffic_ping") {
+      fetchTraffic();
+      return;
+    }
+    if (msg.type === "bc:console_ping") {
+      fetchConsole();
+      return;
+    }
+    if (msg.type === "bc:audit_ping") {
+      fetchAudit();
+      return;
+    }
+    if (msg.type === "bc:flow_ping") {
+      fetchFlow();
+      return;
+    }
+    if (msg.type === "bc:storage_ping") {
+      fetchStorage();
+      return;
+    }
+    if (msg.type === "bc:templates_ping") {
+      fetch("/api/templates", { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (data && Array.isArray(data.items)) {
+            data.items.forEach(function (it) { templatesByDevice[it.device_id] = it; });
+          }
+        }).catch(function () {});
+      return;
+    }
+    if (msg.type === "bc:find_counterpart" && msg.identifiers) {
+      broadcastToOtherFrames(msg.sourceFrame || null, {
+        type: "rv:find_counterpart",
+        identifiers: msg.identifiers
+      });
+      return;
+    }
+    if (msg.type === "bc:inspected_ping" && msg.item) {
+      if (!msg.item.isCounterpart) {
+        lastInspectedElement = msg.item;
+      }
+      var tKey = msg.item.tier || getDeviceTier(msg.item.device_id || msg.item.frame);
+      inspectedByTier[tKey] = msg.item;
+      if (msg.item.device_id || msg.item.frame) {
+        inspectedByDevice[msg.item.device_id || msg.item.frame] = msg.item;
+      }
+      return;
+    }
+    if (msg.type === "bc:traffic_clear") {
+      trafficState.items = [];
+      trafficState.selectedId = null;
+      if (trafficCountEl) trafficCountEl.textContent = "0";
+      renderTrafficTable();
+      renderTrafficDetail();
+      return;
+    }
+    if (msg.type === "bc:console_clear") {
+      consoleState.items = [];
+      consoleState.selectedId = null;
+      updateConsoleBadge();
+      renderConsoleTable();
+      renderConsoleDetail();
+      return;
+    }
+    if (msg.type === "bc:audit_clear") {
+      auditState.items = [];
+      auditState.selectedIdx = -1;
+      updateAuditBadge();
+      renderAuditTable();
+      renderAuditDetail();
+      return;
+    }
+    if (msg.type === "bc:flow_clear") {
+      flowState.items = [];
+      flowState.selectedId = null;
+      if (flowCountEl) flowCountEl.textContent = "0";
+      renderFlowTable();
+      renderFlowDetail();
+      return;
+    }
+
+    // Controles del Toolbar que se sincronizan siempre entre todas las pantallas abiertas
+    if (msg.type === "bc:set_sync" && typeof msg.active === "boolean") {
+      toggleSync(msg.active, true, true);
+      return;
+    }
+    if (msg.type === "bc:set_inspector" && typeof msg.active === "boolean") {
+      toggleInspector(msg.active, true);
+      return;
+    }
+    if (msg.type === "bc:set_audit_highlight" && typeof msg.active === "boolean") {
+      toggleAuditHighlight(msg.active, true);
+      return;
+    }
+    if (msg.type === "bc:run_audit") {
+      triggerAuditScan(true);
+      setTimeout(fetchAudit, 160);
+      return;
+    }
+    if (msg.type === "bc:set_flow_recording" && typeof msg.recording === "boolean") {
+      flowState.recording = msg.recording;
+      if (flowRecordToggle) {
+        flowRecordToggle.setAttribute("aria-pressed", flowState.recording ? "true" : "false");
+        flowRecordToggle.classList.toggle("is-active", flowState.recording);
+        flowRecordToggle.textContent = flowState.recording ? t("flowRecording") : t("flowPaused");
+      }
+      return;
+    }
+    if (msg.type === "bc:set_traffic_paused" && typeof msg.paused === "boolean") {
+      trafficState.paused = msg.paused;
+      if (trafficPauseBtn) {
+        trafficPauseBtn.classList.toggle("is-paused", trafficState.paused);
+        trafficPauseBtn.textContent = trafficState.paused ? t("trafficResume") : t("trafficPause");
+      }
+      if (trafficDot) trafficDot.classList.toggle("is-paused", trafficState.paused);
+      return;
+    }
+    if (msg.type === "bc:set_lang" && msg.lang) {
+      if (I18N.setLang(msg.lang)) {
+        state.active.forEach(translateDevice);
+        updateZoomUI();
+        updateSecondaryMenuBar();
+        renderVirtualTabs();
+        syncLangSwitch();
+      }
+      return;
+    }
+    if (msg.type === "bc:reload") {
+      fetchCertStatus();
+      applyLocalReloadAndClear();
+      return;
+    }
+    if (msg.type === "bc:sync_tabs_state" && Array.isArray(msg.tabs)) {
+      applyRemoteTabsState(msg.tabs, msg.activeTabId);
+      return;
+    }
+    if (msg.type === "bc:open_tab" && msg.tabId) {
+      openVirtualTab(msg.url || "", msg.title || "", { tabId: msg.tabId, fromCrossTab: true });
+      return;
+    }
+    if (msg.type === "bc:switch_tab" && msg.tabId) {
+      switchVirtualTab(msg.tabId, true);
+      return;
+    }
+    if (msg.type === "bc:close_tab" && msg.tabId) {
+      closeVirtualTab(msg.tabId, true);
+      return;
+    }
+    if (msg.type === "bc:load_url" && msg.url) {
+      if (msg.tabId && msg.tabId !== state.activeTabId && getVirtualTabById(msg.tabId)) {
+        switchVirtualTab(msg.tabId, true);
+      }
+      input.value = msg.url;
+      state.url = msg.url;
+      state.frameUrls = {};
+      var activeTb = getActiveVirtualTab();
+      if (activeTb) {
+        activeTb.url = msg.url;
+        activeTb.title = "";
+        activeTb.frameUrls = {};
+      }
+      state.active.forEach(function (id) { navigateFrame(id, msg.url); });
+      renderVirtualTabs();
+      saveVirtualTabsLocally();
+      return;
+    }
+
+    if (!state.sync) return;
+
+    if (msg.type === "bc:tab_url_sync" && msg.url && msg.tabId) {
+      var tbSync = getVirtualTabById(msg.tabId);
+      if (tbSync && msg.title) tbSync.title = msg.title;
+      ensureTabDevicesAtUrl(msg.tabId, msg.url, msg.fromUrl || "");
+    } else if (msg.type === "bc:sync_scroll") {
+      var sp = msg.payload || { type: "rv:do_sync_scroll", dx: msg.dx, dy: msg.dy, force: true };
+      broadcastToOtherFrames(null, sp);
+    } else if (msg.type === "bc:sync_drag" && msg.payload) {
+      broadcastToOtherFrames(null, msg.payload);
+    } else if (msg.type === "bc:sync_click" && msg.payload) {
+      broadcastToOtherFrames(null, msg.payload);
+    } else if (msg.type === "bc:sync_key" && msg.payload) {
+      broadcastToOtherFrames(null, msg.payload);
+    } else if (msg.type === "bc:sync_input" && msg.payload) {
+      broadcastToOtherFrames(null, msg.payload);
+    } else if (msg.type === "bc:sync_submit" && msg.payload) {
+      broadcastToOtherFrames(null, msg.payload);
+    }
+  }
+
   if (syncChannel) {
     syncChannel.addEventListener("message", function (ev) {
-      var msg = ev.data;
-      if (!msg || msg.tabId === TAB_ID) return;
-
-      if (msg.type === "bc:who_is_secondary") {
-        if (windowSlot === "secondary") {
-          postCrossTab({ type: "bc:secondary_alive" });
-        }
-        return;
-      }
-      if (msg.type === "bc:secondary_alive") {
-        openSecondaryTabs[msg.tabId] = true;
-        return;
-      }
-      if (msg.type === "bc:secondary_closed") {
-        delete openSecondaryTabs[msg.tabId];
-        return;
-      }
-      if (msg.type === "bc:secondary_devices_updated" && Array.isArray(msg.devices)) {
-        if (WORKSPACE) WORKSPACE.secondary_devices = msg.devices.slice();
-        updateSecondaryMenuBar();
-        return;
-      }
-      if (msg.type === "bc:popout_add" && windowSlot === "secondary" && Array.isArray(msg.devices)) {
-        if (msg.url && msg.url !== state.url) {
-          state.url = msg.url;
-          input.value = msg.url;
-          state.frameUrls = {};
-        }
-        var merged = filterValidDevices(state.active.concat(msg.devices));
-        if (merged.length) {
-          userModifiedDevicesInTab = true;
-          replaceActiveDevicesList(merged);
-        }
-        return;
-      }
-      if (msg.type === "bc:request_window_snapshot" && msg.requestId) {
-        if (state.active.length && typeof renderLocalWindowSnapshotDataUrl === "function") {
-          renderLocalWindowSnapshotDataUrl().then(function (snapPayload) {
-            if (!snapPayload) return;
-            postCrossTab({
-              type: "bc:window_snapshot_response",
-              requestId: msg.requestId,
-              windowSlot: windowSlot,
-              windowTitle: windowSlot === "secondary" ? "2da Pantalla / Monitor Vertical" : "Pantalla Principal",
-              devices: state.active.map(function (id) {
-                var d = BY_ID[id];
-                return d ? (d.name + " (" + d.width + "×" + d.height + ")") : id;
-              }),
-              deviceCount: state.active.length,
-              width: snapPayload.width,
-              height: snapPayload.height,
-              dataUrl: snapPayload.dataUrl
-            });
-          }).catch(function () {});
-        }
-        return;
-      }
-      if (msg.type === "bc:traffic_ping") {
-        fetchTraffic();
-        return;
-      }
-      if (msg.type === "bc:console_ping") {
-        fetchConsole();
-        return;
-      }
-      if (msg.type === "bc:audit_ping") {
-        fetchAudit();
-        return;
-      }
-      if (msg.type === "bc:flow_ping") {
-        fetchFlow();
-        return;
-      }
-      if (msg.type === "bc:storage_ping") {
-        fetchStorage();
-        return;
-      }
-      if (msg.type === "bc:templates_ping") {
-        fetch("/api/templates", { credentials: "same-origin" })
-          .then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (data) {
-            if (data && Array.isArray(data.items)) {
-              data.items.forEach(function (it) { templatesByDevice[it.device_id] = it; });
-            }
-          }).catch(function () {});
-        return;
-      }
-      if (msg.type === "bc:find_counterpart" && msg.identifiers) {
-        broadcastToOtherFrames(msg.sourceFrame || null, {
-          type: "rv:find_counterpart",
-          identifiers: msg.identifiers
-        });
-        return;
-      }
-      if (msg.type === "bc:inspected_ping" && msg.item) {
-        if (!msg.item.isCounterpart) {
-          lastInspectedElement = msg.item;
-        }
-        var tKey = msg.item.tier || getDeviceTier(msg.item.device_id || msg.item.frame);
-        inspectedByTier[tKey] = msg.item;
-        if (msg.item.device_id || msg.item.frame) {
-          inspectedByDevice[msg.item.device_id || msg.item.frame] = msg.item;
-        }
-        return;
-      }
-      if (msg.type === "bc:traffic_clear") {
-        trafficState.items = [];
-        trafficState.selectedId = null;
-        if (trafficCountEl) trafficCountEl.textContent = "0";
-        renderTrafficTable();
-        renderTrafficDetail();
-        return;
-      }
-      if (msg.type === "bc:console_clear") {
-        consoleState.items = [];
-        consoleState.selectedId = null;
-        updateConsoleBadge();
-        renderConsoleTable();
-        renderConsoleDetail();
-        return;
-      }
-      if (msg.type === "bc:audit_clear") {
-        auditState.items = [];
-        auditState.selectedIdx = -1;
-        updateAuditBadge();
-        renderAuditTable();
-        renderAuditDetail();
-        return;
-      }
-      if (msg.type === "bc:flow_clear") {
-        flowState.items = [];
-        flowState.selectedId = null;
-        if (flowCountEl) flowCountEl.textContent = "0";
-        renderFlowTable();
-        renderFlowDetail();
-        return;
-      }
-
-      if (msg.type === "bc:set_sync" && typeof msg.active === "boolean") {
-        toggleSync(msg.active, true, true);
-        return;
-      }
-
-      if (!state.sync) return;
-
-      if (msg.type === "bc:load_url" && msg.url) {
-        input.value = msg.url;
-        state.url = msg.url;
-        state.frameUrls = {};
-        var activeTb = getActiveVirtualTab();
-        if (activeTb) {
-          activeTb.url = msg.url;
-          activeTb.title = "";
-          activeTb.frameUrls = {};
-        }
-        state.active.forEach(function (id) { navigateFrame(id, msg.url); });
-        renderVirtualTabs();
-      } else if (msg.type === "bc:open_tab" && msg.tabId) {
-        openVirtualTab(msg.url || "", msg.title || "", { tabId: msg.tabId, fromCrossTab: true });
-      } else if (msg.type === "bc:switch_tab" && msg.tabId) {
-        switchVirtualTab(msg.tabId, true);
-      } else if (msg.type === "bc:close_tab" && msg.tabId) {
-        closeVirtualTab(msg.tabId, true);
-      } else if (msg.type === "bc:reload") {
-        clearDocumentCookies();
-        if (state.url) {
-          state.active.forEach(function (id) {
-            navigateFrame(id, state.frameUrls[id] || state.url, true);
-          });
-        }
-      } else if (msg.type === "bc:sync_scroll") {
-        var sp = msg.payload || { type: "rv:do_sync_scroll", dx: msg.dx, dy: msg.dy, force: true };
-        broadcastToOtherFrames(null, sp);
-      } else if (msg.type === "bc:sync_drag" && msg.payload) {
-        broadcastToOtherFrames(null, msg.payload);
-      } else if (msg.type === "bc:sync_click" && msg.payload) {
-        broadcastToOtherFrames(null, msg.payload);
-      } else if (msg.type === "bc:sync_key" && msg.payload) {
-        broadcastToOtherFrames(null, msg.payload);
-      } else if (msg.type === "bc:sync_input" && msg.payload) {
-        broadcastToOtherFrames(null, msg.payload);
-      } else if (msg.type === "bc:sync_submit" && msg.payload) {
-        broadcastToOtherFrames(null, msg.payload);
-      }
+      handleCrossTabMessage(ev.data);
     });
   }
+
+  window.addEventListener("storage", function (ev) {
+    if (!ev || ev.key !== CROSS_BUS_STORAGE_KEY || !ev.newValue) return;
+    try {
+      var parsed = JSON.parse(ev.newValue);
+      handleCrossTabMessage(parsed);
+    } catch (_e) {}
+  });
+
+  var isPollingSyncBus = false;
+  function pollServerSyncBus() {
+    if (isPollingSyncBus) return;
+    isPollingSyncBus = true;
+    fetch("/api/sync-bus?since=" + serverSyncSeq + "&tab_id=" + encodeURIComponent(TAB_ID), {
+      credentials: "same-origin"
+    })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || !data.ok) return;
+        var wasInit = (serverSyncSeq < 0);
+        if (typeof data.seq === "number") {
+          serverSyncSeq = data.seq;
+        }
+        if (!wasInit && Array.isArray(data.events)) {
+          data.events.forEach(function (evMsg) {
+            handleCrossTabMessage(evMsg);
+          });
+        }
+        if (data.workspace) {
+          var ws = data.workspace;
+          if (typeof ws.sync === "boolean" && ws.sync !== state.sync) {
+            toggleSync(ws.sync, true, true);
+          }
+          if (typeof ws.inspector === "boolean" && ws.inspector !== state.inspector) {
+            toggleInspector(ws.inspector, true);
+          }
+          if (Array.isArray(ws.tabs) && ws.tabs.length) {
+            var localTabsStr = JSON.stringify(serializeVirtualTabs());
+            var remoteTabsStr = JSON.stringify(ws.tabs);
+            if (localTabsStr !== remoteTabsStr || (ws.active_tab_id && ws.active_tab_id !== state.activeTabId)) {
+              applyRemoteTabsState(ws.tabs, ws.active_tab_id);
+            }
+          }
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        isPollingSyncBus = false;
+      });
+  }
+  setInterval(pollServerSyncBus, 250);
 
   // ---------- Sincronización Multi-Dispositivo ----------
   function updateSyncUI() {
@@ -2168,16 +2500,9 @@
     store(STORE_SYNC, state.sync);
     updateSyncUI();
 
-    state.active.forEach(function (id) {
-      var item = els[id];
-      if (item && item.iframe && item.iframe.contentWindow) {
-        try {
-          item.iframe.contentWindow.postMessage({
-            type: "rv:set_sync",
-            active: state.sync
-          }, location.origin);
-        } catch (_e) {}
-      }
+    postToAllDeviceTabIframes({
+      type: "rv:set_sync",
+      active: state.sync
     });
 
     if (!fromCrossTab) {
@@ -2230,7 +2555,7 @@
     if (inspectFloat) inspectFloat.hidden = true;
   }
 
-  function toggleInspector(on) {
+  function toggleInspector(on, fromCrossTab) {
     if (on === undefined) on = !state.inspector;
     state.inspector = !!on;
 
@@ -2245,17 +2570,15 @@
       hideInspectorFloat();
     }
 
-    state.active.forEach(function (id) {
-      var item = els[id];
-      if (item && item.iframe && item.iframe.contentWindow) {
-        try {
-          item.iframe.contentWindow.postMessage({
-            type: "rv:set_inspector",
-            active: state.inspector
-          }, location.origin);
-        } catch (_e) {}
-      }
+    postToAllDeviceTabIframes({
+      type: "rv:set_inspector",
+      active: state.inspector
     });
+
+    if (!fromCrossTab) {
+      postCrossTab({ type: "bc:set_inspector", active: state.inspector });
+      persistWorkspaceToServer({ inspector: state.inspector });
+    }
   }
 
   function showInspectorHover(data) {
@@ -2960,7 +3283,7 @@
       });
   }
 
-  function triggerAuditScan() {
+  function triggerAuditScan(fromCrossTab) {
     state.active.forEach(function (id) {
       var item = els[id];
       if (item && item.iframe && !item.iframe.hidden && item.iframe.contentWindow) {
@@ -2969,26 +3292,25 @@
         } catch (_e) {}
       }
     });
+    if (!fromCrossTab) {
+      postCrossTab({ type: "bc:run_audit" });
+    }
   }
 
-  function toggleAuditHighlight(on) {
+  function toggleAuditHighlight(on, fromCrossTab) {
     if (on === undefined) on = !auditState.highlightOnScreens;
     auditState.highlightOnScreens = !!on;
     if (auditHighlightBtn) {
       auditHighlightBtn.setAttribute("aria-pressed", auditState.highlightOnScreens ? "true" : "false");
       auditHighlightBtn.classList.toggle("is-active", auditState.highlightOnScreens);
     }
-    state.active.forEach(function (id) {
-      var item = els[id];
-      if (item && item.iframe && item.iframe.contentWindow) {
-        try {
-          item.iframe.contentWindow.postMessage({
-            type: "rv:set_audit_highlight",
-            active: auditState.highlightOnScreens
-          }, location.origin);
-        } catch (_e) {}
-      }
+    postToAllDeviceTabIframes({
+      type: "rv:set_audit_highlight",
+      active: auditState.highlightOnScreens
     });
+    if (!fromCrossTab) {
+      postCrossTab({ type: "bc:set_audit_highlight", active: auditState.highlightOnScreens });
+    }
   }
 
   // ---------- Rastreador de Usuario (Pasos con Sección, Zona, Coordenadas, Scroll, Swipe + Playwright) ----------
@@ -5226,6 +5548,7 @@
       flowRecordToggle.setAttribute("aria-pressed", flowState.recording ? "true" : "false");
       flowRecordToggle.classList.toggle("is-active", flowState.recording);
       flowRecordToggle.textContent = flowState.recording ? t("flowRecording") : t("flowPaused");
+      postCrossTab({ type: "bc:set_flow_recording", recording: flowState.recording });
     });
   }
   if (flowCopyBtn) {
@@ -5264,6 +5587,7 @@
       trafficPauseBtn.classList.toggle("is-paused", trafficState.paused);
       trafficPauseBtn.textContent = trafficState.paused ? t("trafficResume") : t("trafficPause");
       if (trafficDot) trafficDot.classList.toggle("is-paused", trafficState.paused);
+      postCrossTab({ type: "bc:set_traffic_paused", paused: trafficState.paused });
       if (!trafficState.paused) {
         fetchTraffic();
         fetchConsole();
@@ -5850,6 +6174,7 @@
       updateSecondaryMenuBar();
       renderVirtualTabs();
       syncLangSwitch();
+      postCrossTab({ type: "bc:set_lang", lang: b.dataset.lang });
     });
   });
 
@@ -5907,19 +6232,36 @@
 
   var serverUrl = (WORKSPACE && typeof WORKSPACE.url === "string" && WORKSPACE.url) ? WORKSPACE.url : "";
   var savedUrl = paramUrl ? normalizeUrl(paramUrl) : (load(STORE_URL) || serverUrl);
-  if (typeof savedUrl === "string" && savedUrl) {
+  var savedTabsFromServer = (WORKSPACE && Array.isArray(WORKSPACE.tabs) && WORKSPACE.tabs.length) ? WORKSPACE.tabs : null;
+  var savedTabsFromLocal = load(STORE_TABS);
+  var initialTabsList = (!paramUrl && Array.isArray(savedTabsFromServer) && savedTabsFromServer.length)
+    ? savedTabsFromServer
+    : ((!paramUrl && Array.isArray(savedTabsFromLocal) && savedTabsFromLocal.length) ? savedTabsFromLocal : null);
+  var initialActiveTabId = (WORKSPACE && typeof WORKSPACE.active_tab_id === "string" && WORKSPACE.active_tab_id)
+    ? WORKSPACE.active_tab_id
+    : (load(STORE_ACTIVE_TAB) || "tab-1");
+
+  if (initialTabsList && initialTabsList.length) {
+    applyRemoteTabsState(initialTabsList, initialActiveTabId);
+  } else if (typeof savedUrl === "string" && savedUrl) {
     state.url = savedUrl;
     if (state.tabs[0]) state.tabs[0].url = savedUrl;
     input.value = savedUrl;
     store(STORE_URL, savedUrl);
     syncUrlParamsWithState();
     state.active.forEach(function (id) { navigateFrame(id, savedUrl); });
+    saveVirtualTabsLocally();
   }
   renderVirtualTabs();
 
   var savedSync = load(STORE_SYNC);
   if (typeof savedSync === "boolean") state.sync = savedSync;
+  else if (WORKSPACE && typeof WORKSPACE.sync === "boolean") state.sync = WORKSPACE.sync;
   updateSyncUI();
+
+  if (WORKSPACE && typeof WORKSPACE.inspector === "boolean" && WORKSPACE.inspector) {
+    toggleInspector(true, true);
+  }
 
   var savedZoom = load(STORE_ZOOM);
   if (savedZoom === "fit" || savedZoom === "fill") state.zoomMode = savedZoom;
@@ -5930,6 +6272,7 @@
     if (savedStack === "stack" || savedStack === "auto") state.stackMode = savedStack;
   } catch (_e) {}
 
+  pollServerSyncBus();
   layout();
   if (window.ResizeObserver) new ResizeObserver(layout).observe(stage);
   else window.addEventListener("resize", layout);
