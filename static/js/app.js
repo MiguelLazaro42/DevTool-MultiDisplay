@@ -255,10 +255,13 @@
   var SESSION_DEVICES = "rv.tab.devices";
   var SESSION_SLOT = "rv.tab.slot";
   var STORE_TABS = "rv.tabs";
+  var STORE_ACTIVE_TAB = "rv.active_tab";
   var CROSS_BUS_STORAGE_KEY = "rv.cross_tab_bus";
   var syncChannel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("rv_multidisplay_sync") : null;
   var initParams = new URLSearchParams(location.search);
   var userModifiedDevicesInTab = false;
+  var isBootstrapping = true;
+  var persistTabsTimer = null;
   var popoutAckCallbacks = {};
   var crossMsgSeq = 0;
   var seenCrossTabMsgs = {};
@@ -401,6 +404,7 @@
   }
 
   function persistWorkspaceToServer(extra) {
+    if (isBootstrapping) return;
     var payload = extra ? Object.assign({}, extra) : {};
     if (windowSlot === "secondary") {
       payload.secondary_devices = state.active.slice();
@@ -422,6 +426,10 @@
         };
       });
       payload.active_tab_id = state.activeTabId || "tab-1";
+      if (WORKSPACE) {
+        WORKSPACE.tabs = payload.tabs;
+        WORKSPACE.active_tab_id = payload.active_tab_id;
+      }
     }
     fetch("/api/workspace", {
       method: "POST",
@@ -665,10 +673,74 @@
   }
 
   function saveVirtualTabsLocally() {
+    var serialized = serializeVirtualTabs();
+    var activeId = state.activeTabId || "tab-1";
     store(STORE_TABS, {
-      tabs: serializeVirtualTabs(),
-      activeTabId: state.activeTabId || "tab-1"
+      tabs: serialized,
+      activeTabId: activeId,
+      updatedAt: Date.now()
     });
+    store(STORE_ACTIVE_TAB, activeId);
+    if (WORKSPACE) {
+      WORKSPACE.tabs = serialized;
+      WORKSPACE.active_tab_id = activeId;
+    }
+  }
+
+  function schedulePersistTabsToServer() {
+    saveVirtualTabsLocally();
+    if (isBootstrapping) return;
+    clearTimeout(persistTabsTimer);
+    persistTabsTimer = setTimeout(function () {
+      persistWorkspaceToServer({
+        tabs: serializeVirtualTabs(),
+        active_tab_id: state.activeTabId || "tab-1",
+        url: state.url || ""
+      });
+    }, 120);
+  }
+
+  function getRestoredVirtualTabsState() {
+    var localRaw = load(STORE_TABS);
+    var localTabs = null;
+    var localActiveId = load(STORE_ACTIVE_TAB) || "";
+    if (Array.isArray(localRaw) && localRaw.length) {
+      localTabs = localRaw;
+    } else if (localRaw && typeof localRaw === "object" && Array.isArray(localRaw.tabs) && localRaw.tabs.length) {
+      localTabs = localRaw.tabs;
+      if (localRaw.activeTabId) localActiveId = localRaw.activeTabId;
+    }
+
+    var serverTabs = (WORKSPACE && Array.isArray(WORKSPACE.tabs) && WORKSPACE.tabs.length) ? WORKSPACE.tabs : null;
+    var serverActiveId = (WORKSPACE && typeof WORKSPACE.active_tab_id === "string" && WORKSPACE.active_tab_id)
+      ? WORKSPACE.active_tab_id
+      : "";
+
+    var chosenTabs = null;
+    var chosenActiveId = "tab-1";
+    if (localTabs && serverTabs) {
+      if (serverTabs.length > localTabs.length) {
+        chosenTabs = serverTabs;
+        chosenActiveId = serverActiveId || localActiveId || "tab-1";
+      } else {
+        chosenTabs = localTabs;
+        chosenActiveId = localActiveId || serverActiveId || "tab-1";
+      }
+    } else if (localTabs) {
+      chosenTabs = localTabs;
+      chosenActiveId = localActiveId || serverActiveId || "tab-1";
+    } else if (serverTabs) {
+      chosenTabs = serverTabs;
+      chosenActiveId = serverActiveId || localActiveId || "tab-1";
+    }
+
+    if (!chosenTabs || !chosenTabs.length) return null;
+    var hasValidContent = chosenTabs.length > 1 || chosenTabs.some(function (tb) { return tb && tb.url; });
+    if (!hasValidContent) return null;
+    return {
+      tabs: chosenTabs,
+      activeTabId: chosenActiveId
+    };
   }
 
   function syncTabsStateAcrossWindows(fromCrossTab) {
@@ -693,6 +765,10 @@
     remoteTabs.forEach(function (rt) {
       if (rt && rt.id) remoteMap[rt.id] = rt;
     });
+
+    var targetActiveId = (remoteActiveTabId && remoteMap[remoteActiveTabId])
+      ? remoteActiveTabId
+      : remoteTabs[0].id;
 
     // 1. Quitar iframes de pestañas que se cerraron en la otra ventana
     state.tabs.forEach(function (oldTb) {
@@ -720,11 +796,15 @@
         var urlChanged = !!(rt.url && rt.url !== existing.url);
         existing.num = idx + 1;
         if (rt.title) existing.title = rt.title;
+        if (rt.url) existing.url = rt.url;
         if (urlChanged) {
-          existing.url = rt.url;
           existing.frameUrls = {};
           state.active.forEach(function (devId) {
-            navigateFrame(devId, rt.url, false, existing.id);
+            var e = els[devId];
+            var ifr = e && e.tabIframes && e.tabIframes[existing.id];
+            if (existing.id === targetActiveId || (ifr && ifr.getAttribute("src"))) {
+              navigateFrame(devId, rt.url, false, existing.id);
+            }
           });
         }
         nextTabs.push(existing);
@@ -742,10 +822,6 @@
 
     if (!nextTabs.length) return;
     state.tabs = nextTabs;
-
-    var targetActiveId = (remoteActiveTabId && remoteMap[remoteActiveTabId])
-      ? remoteActiveTabId
-      : state.tabs[0].id;
 
     switchVirtualTab(targetActiveId, true);
     saveVirtualTabsLocally();
@@ -855,7 +931,11 @@
 
     var prevTab = getActiveVirtualTab();
     if (prevTab && prevTab.id !== targetTab.id) {
-      prevTab.url = state.url || prevTab.url || "";
+      if (!fromCrossTab && state.url) {
+        prevTab.url = state.url;
+      } else if (!prevTab.url && state.url) {
+        prevTab.url = state.url;
+      }
       prevTab.frameUrls = Object.assign({}, prevTab.frameUrls || {}, state.frameUrls || {});
     }
 
@@ -1959,7 +2039,7 @@
         }
       }
       renderVirtualTabs();
-      saveVirtualTabsLocally();
+      schedulePersistTabsToServer();
       if (urlMoved && state.sync) {
         ensureTabDevicesAtUrl(msgTabId, d.url, prevUrl);
         postCrossTab({
@@ -2463,7 +2543,7 @@
             handleCrossTabMessage(evMsg);
           });
         }
-        if (data.workspace) {
+        if (wasInit && data.workspace) {
           var ws = data.workspace;
           if (typeof ws.sync === "boolean" && ws.sync !== state.sync) {
             toggleSync(ws.sync, true, true);
@@ -2471,12 +2551,8 @@
           if (typeof ws.inspector === "boolean" && ws.inspector !== state.inspector) {
             toggleInspector(ws.inspector, true);
           }
-          if (Array.isArray(ws.tabs) && ws.tabs.length) {
-            var localTabsStr = JSON.stringify(serializeVirtualTabs());
-            var remoteTabsStr = JSON.stringify(ws.tabs);
-            if (localTabsStr !== remoteTabsStr || (ws.active_tab_id && ws.active_tab_id !== state.activeTabId)) {
-              applyRemoteTabsState(ws.tabs, ws.active_tab_id);
-            }
+          if (Array.isArray(ws.tabs) && ws.tabs.length > state.tabs.length) {
+            applyRemoteTabsState(ws.tabs, ws.active_tab_id);
           }
         }
       })
@@ -6199,6 +6275,10 @@
     return;
   }
 
+  window.addEventListener("beforeunload", function () {
+    saveVirtualTabsLocally();
+  });
+
   if (windowSlot === "secondary") {
     postCrossTab({ type: "bc:secondary_alive" });
     window.addEventListener("beforeunload", function () {
@@ -6227,28 +6307,20 @@
 
   var initial = (Array.isArray(saved) && saved.length) ? saved : DEFAULTS.slice();
   initial.forEach(function (id) { state.active.push(id); createDevice(id); });
-  saveActiveDevices();
   syncMenu();
 
   var serverUrl = (WORKSPACE && typeof WORKSPACE.url === "string" && WORKSPACE.url) ? WORKSPACE.url : "";
   var savedUrl = paramUrl ? normalizeUrl(paramUrl) : (load(STORE_URL) || serverUrl);
-  var savedTabsFromServer = (WORKSPACE && Array.isArray(WORKSPACE.tabs) && WORKSPACE.tabs.length) ? WORKSPACE.tabs : null;
-  var savedTabsFromLocal = load(STORE_TABS);
-  var initialTabsList = (!paramUrl && Array.isArray(savedTabsFromServer) && savedTabsFromServer.length)
-    ? savedTabsFromServer
-    : ((!paramUrl && Array.isArray(savedTabsFromLocal) && savedTabsFromLocal.length) ? savedTabsFromLocal : null);
-  var initialActiveTabId = (WORKSPACE && typeof WORKSPACE.active_tab_id === "string" && WORKSPACE.active_tab_id)
-    ? WORKSPACE.active_tab_id
-    : (load(STORE_ACTIVE_TAB) || "tab-1");
+  var restoredTabs = getRestoredVirtualTabsState();
 
-  if (initialTabsList && initialTabsList.length) {
-    applyRemoteTabsState(initialTabsList, initialActiveTabId);
+  if (restoredTabs && restoredTabs.tabs && restoredTabs.tabs.length) {
+    applyRemoteTabsState(restoredTabs.tabs, restoredTabs.activeTabId);
+    if (state.url) store(STORE_URL, state.url);
   } else if (typeof savedUrl === "string" && savedUrl) {
     state.url = savedUrl;
     if (state.tabs[0]) state.tabs[0].url = savedUrl;
     input.value = savedUrl;
     store(STORE_URL, savedUrl);
-    syncUrlParamsWithState();
     state.active.forEach(function (id) { navigateFrame(id, savedUrl); });
     saveVirtualTabsLocally();
   }
@@ -6262,6 +6334,9 @@
   if (WORKSPACE && typeof WORKSPACE.inspector === "boolean" && WORKSPACE.inspector) {
     toggleInspector(true, true);
   }
+
+  isBootstrapping = false;
+  saveActiveDevices();
 
   var savedZoom = load(STORE_ZOOM);
   if (savedZoom === "fit" || savedZoom === "fill") state.zoomMode = savedZoom;
