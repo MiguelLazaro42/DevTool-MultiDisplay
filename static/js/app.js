@@ -1585,7 +1585,13 @@
         key: d.key,
         code: d.code,
         keyCode: d.keyCode,
-        selector: d.selector
+        selector: d.selector,
+        structuralSelector: d.structuralSelector || "",
+        id: d.id || "",
+        name: d.name || "",
+        placeholder: d.placeholder || "",
+        tag: d.tag || "",
+        value: d.value
       };
       broadcastToOtherFrames(d.frame, keyPayload);
       postCrossTab({ type: "bc:sync_key", payload: keyPayload });
@@ -1598,6 +1604,7 @@
         structuralSelector: d.structuralSelector,
         id: d.id,
         name: d.name,
+        placeholder: d.placeholder || "",
         tag: d.tag,
         value: d.value,
         checked: d.checked,
@@ -1605,6 +1612,17 @@
       };
       broadcastToOtherFrames(d.frame, inputPayload);
       postCrossTab({ type: "bc:sync_input", payload: inputPayload });
+    } else if (d.type === "rv:sync_submit") {
+      if (!state.sync) return;
+      var submitPayload = {
+        type: "rv:do_sync_submit",
+        method: d.method || "get",
+        targetUrl: d.targetUrl || "",
+        selector: d.selector || "",
+        structuralSelector: d.structuralSelector || ""
+      };
+      broadcastToOtherFrames(d.frame, submitPayload);
+      postCrossTab({ type: "bc:sync_submit", payload: submitPayload });
     }
   });
 
@@ -1749,6 +1767,11 @@
         return;
       }
 
+      if (msg.type === "bc:set_sync" && typeof msg.active === "boolean") {
+        toggleSync(msg.active, true, true);
+        return;
+      }
+
       if (!state.sync) return;
 
       if (msg.type === "bc:load_url" && msg.url) {
@@ -1774,6 +1797,8 @@
         broadcastToOtherFrames(null, msg.payload);
       } else if (msg.type === "bc:sync_input" && msg.payload) {
         broadcastToOtherFrames(null, msg.payload);
+      } else if (msg.type === "bc:sync_submit" && msg.payload) {
+        broadcastToOtherFrames(null, msg.payload);
       }
     });
   }
@@ -1785,7 +1810,7 @@
     syncBtn.classList.toggle("is-active", state.sync);
   }
 
-  function toggleSync(on, silent) {
+  function toggleSync(on, silent, fromCrossTab) {
     if (on === undefined) on = !state.sync;
     state.sync = !!on;
     store(STORE_SYNC, state.sync);
@@ -1802,6 +1827,11 @@
         } catch (_e) {}
       }
     });
+
+    if (!fromCrossTab) {
+      postCrossTab({ type: "bc:set_sync", active: state.sync });
+      persistWorkspaceToServer();
+    }
 
     if (!silent) {
       toast(state.sync ? t("syncOn") : t("syncOff"));

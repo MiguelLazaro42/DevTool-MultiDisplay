@@ -213,7 +213,7 @@
     return { method: attr("method", "get").toLowerCase(), action: action };
   }
 
-  function sendForm(form, submitter, info) {
+  function sendForm(form, submitter, info, skipSyncBroadcast) {
     if (info.method === "get") {
       // El navegador borraría la query del action al enviar por GET, así que
       // armamos la URL a mano.
@@ -226,6 +226,18 @@
         merged.set(key, val);
       });
       u.search = merged.toString();
+      if (!skipSyncBroadcast && typeof syncActive !== "undefined" && syncActive && !isReplayingSync) {
+        try {
+          parent.postMessage({
+            type: "rv:sync_submit",
+            frame: F,
+            method: "get",
+            targetUrl: u.href,
+            selector: typeof getSelector === "function" ? getSelector(form, false) : "",
+            structuralSelector: typeof getSelector === "function" ? getSelector(form, true) : ""
+          }, ORIGIN);
+        } catch (_e) {}
+      }
       location.href = via(u.href);
       return true;
     }
@@ -239,14 +251,14 @@
   window.addEventListener("submit", function (e) {
     if (e.defaultPrevented) return;          // la página lo envía con JavaScript
     var info = formInfo(e.target, e.submitter);
-    if (info && sendForm(e.target, e.submitter, info)) e.preventDefault();
+    if (info && sendForm(e.target, e.submitter, info, isReplayingSync)) e.preventDefault();
   });
 
   // form.submit() no dispara el evento "submit".
   var nativeSubmit = HTMLFormElement.prototype.submit;
   HTMLFormElement.prototype.submit = function () {
     var info = formInfo(this, null);
-    if (info && sendForm(this, null, info)) return;
+    if (info && sendForm(this, null, info, isReplayingSync)) return;
     return nativeSubmit.call(this);
   };
 
@@ -1621,6 +1633,7 @@
         structuralSelector: getSelector(t, true),
         id: t.id || "",
         name: t.name || "",
+        placeholder: t.getAttribute ? (t.getAttribute("placeholder") || "") : "",
         tag: tag,
         value: t.value,
         checked: !!t.checked,
@@ -1636,6 +1649,25 @@
     if (inspectorActive || isReplayingSync || !e.isTrusted) return;
     var form = e.target;
     if (!form || !form.tagName) return;
+
+    if (syncActive) {
+      var fInfo = formInfo(form, e.submitter);
+      // Para formularios GET, sendForm ya emite rv:sync_submit con targetUrl completo.
+      // Aquí emitimos rv:sync_submit para formularios manejados por JS (SPA/AJAX) o POST.
+      if (!fInfo || fInfo.method !== "get") {
+        try {
+          parent.postMessage({
+            type: "rv:sync_submit",
+            frame: F,
+            method: fInfo ? fInfo.method : (form.getAttribute("method") || "post").toLowerCase(),
+            targetUrl: "",
+            selector: getSelector(form, false),
+            structuralSelector: getSelector(form, true)
+          }, ORIGIN);
+        } catch (_e) {}
+      }
+    }
+
     var box = getElementBox(form);
     var zInfo = getScreenZoneAndCoords((box.x || 0) + (box.width || 0) / 2, (box.y || 0) + (box.height || 0) / 2);
     try {
@@ -1671,7 +1703,13 @@
           key: e.key,
           code: e.code || "",
           keyCode: e.keyCode || 0,
-          selector: getSelector(activeEl, false)
+          selector: getSelector(activeEl, false),
+          structuralSelector: getSelector(activeEl, true),
+          id: activeEl.id || "",
+          name: activeEl.name || "",
+          placeholder: activeEl.getAttribute ? (activeEl.getAttribute("placeholder") || "") : "",
+          tag: activeTag,
+          value: isTypingField ? (activeEl.value || "") : undefined
         }, ORIGIN);
       } catch (_e) {}
     }
@@ -1779,6 +1817,95 @@
       }
     }
     return null;
+  }
+
+  var lastSyncedInputEl = null;
+  var lastSyncedSubmitAt = 0;
+
+  function findSyncedInputElement(d) {
+    var selectors = [d.selector, d.structuralSelector];
+    var hiddenFallback = null;
+    for (var i = 0; i < selectors.length; i++) {
+      if (!selectors[i]) continue;
+      try {
+        var list = document.querySelectorAll(selectors[i]);
+        for (var j = 0; j < list.length; j++) {
+          if (isVisible(list[j])) return list[j];
+          if (!hiddenFallback) hiddenFallback = list[j];
+        }
+      } catch (_e) {}
+    }
+    if (d.id) {
+      var byId = document.getElementById(d.id);
+      if (byId) {
+        if (isVisible(byId)) return byId;
+        if (!hiddenFallback) hiddenFallback = byId;
+      }
+    }
+    if (d.name) {
+      try {
+        var tagPrefix = (d.tag === "input" || d.tag === "textarea" || d.tag === "select") ? d.tag : "input, textarea, select";
+        var byNameList = document.querySelectorAll(tagPrefix + '[name="' + safeIdent(d.name) + '"]');
+        for (var k = 0; k < byNameList.length; k++) {
+          if (isVisible(byNameList[k])) return byNameList[k];
+          if (!hiddenFallback) hiddenFallback = byNameList[k];
+        }
+      } catch (_e) {}
+    }
+    if (d.placeholder) {
+      try {
+        var allInputs = document.querySelectorAll("input, textarea");
+        var normPh = d.placeholder.trim().toLowerCase();
+        for (var m = 0; m < allInputs.length; m++) {
+          var ph = (allInputs[m].getAttribute("placeholder") || "").trim().toLowerCase();
+          if (ph && ph === normPh) {
+            if (isVisible(allInputs[m])) return allInputs[m];
+            if (!hiddenFallback) hiddenFallback = allInputs[m];
+          }
+        }
+      } catch (_e) {}
+    }
+    if (lastSyncedInputEl && document.body && document.body.contains(lastSyncedInputEl)) {
+      return lastSyncedInputEl;
+    }
+    return hiddenFallback;
+  }
+
+  function setInputElementValue(inp, val, checked, inputType) {
+    if (!inp) return;
+    if (inputType === "checkbox" || inputType === "radio") {
+      inp.checked = !!checked;
+      return;
+    }
+    var strVal = val === undefined || val === null ? "" : String(val);
+    try {
+      var proto = (inp.tagName || "").toLowerCase() === "textarea"
+        ? (typeof HTMLTextAreaElement !== "undefined" && HTMLTextAreaElement.prototype)
+        : (typeof HTMLInputElement !== "undefined" && HTMLInputElement.prototype);
+      var desc = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
+      if (desc && typeof desc.set === "function") {
+        desc.set.call(inp, strVal);
+        return;
+      }
+    } catch (_e) {}
+    inp.value = strVal;
+  }
+
+  function triggerSyncedFormSubmission(form) {
+    if (!form) return false;
+    lastSyncedSubmitAt = Date.now();
+    var subEv = new Event("submit", { bubbles: true, cancelable: true });
+    var notCancelled = form.dispatchEvent(subEv);
+    if (notCancelled) {
+      var info = formInfo(form, null);
+      if (info && sendForm(form, null, info, true)) {
+        return true;
+      }
+      try {
+        nativeSubmit.call(form);
+      } catch (_e) {}
+    }
+    return true;
   }
 
   window.addEventListener("message", function (e) {
@@ -1923,23 +2050,47 @@
       if (!syncActive) return;
       isReplayingSync = true;
       try {
-        var keyTarget = null;
-        if (d.selector) {
-          try { keyTarget = document.querySelector(d.selector); } catch (_e) {}
-        }
+        var keyTarget = findSyncedInputElement(d);
         if (!keyTarget) keyTarget = document.activeElement || document.body;
+
+        var targetTag = (keyTarget.tagName || "").toLowerCase();
+        if (d.value !== undefined && (targetTag === "input" || targetTag === "textarea")) {
+          if (keyTarget.value !== d.value) {
+            setInputElementValue(keyTarget, d.value, false, "text");
+            keyTarget.dispatchEvent(new Event("input", { bubbles: true }));
+            keyTarget.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+        if (typeof keyTarget.focus === "function" && keyTarget !== document.body) {
+          try { keyTarget.focus({ preventScroll: true }); } catch (_e) {}
+        }
+
+        var keyNum = d.keyCode || (d.key === "Escape" ? 27 : (d.key === "Enter" ? 13 : 0));
         var kInit = {
           key: d.key || "",
-          code: d.code || d.key || "",
-          keyCode: d.keyCode || (d.key === "Escape" ? 27 : (d.key === "Enter" ? 13 : 0)),
-          which: d.keyCode || (d.key === "Escape" ? 27 : (d.key === "Enter" ? 13 : 0)),
+          code: d.code || (d.key === "Enter" ? "Enter" : (d.key === "Escape" ? "Escape" : (d.key || ""))),
+          keyCode: keyNum,
+          which: keyNum,
+          charCode: d.key === "Enter" ? 13 : 0,
           bubbles: true,
           cancelable: true
         };
-        keyTarget.dispatchEvent(new KeyboardEvent("keydown", kInit));
-        document.dispatchEvent(new KeyboardEvent("keydown", kInit));
-        window.dispatchEvent(new KeyboardEvent("keydown", kInit));
+        var kdNotPrevented = keyTarget.dispatchEvent(new KeyboardEvent("keydown", kInit));
+        var kpNotPrevented = true;
+        if (d.key === "Enter") {
+          kpNotPrevented = keyTarget.dispatchEvent(new KeyboardEvent("keypress", kInit));
+        }
         keyTarget.dispatchEvent(new KeyboardEvent("keyup", kInit));
+
+        // En el navegador, pulsar Enter dentro de un <input> envía el <form> contenedor
+        // (los KeyboardEvent sintéticos no disparan el submit nativo por sí solos).
+        if (d.key === "Enter" && kdNotPrevented && kpNotPrevented && targetTag !== "textarea") {
+          var enclosingForm = keyTarget.form || (keyTarget.closest && keyTarget.closest("form"));
+          if (enclosingForm && Date.now() - lastSyncedSubmitAt > 350) {
+            triggerSyncedFormSubmission(enclosingForm);
+          }
+        }
+
         if (d.key === "Escape") {
           var openDialogs = document.querySelectorAll("dialog[open]");
           for (var di = 0; di < openDialogs.length; di++) {
@@ -1947,30 +2098,15 @@
           }
         }
       } catch (_e2) {}
-      setTimeout(function () { isReplayingSync = false; }, 50);
+      setTimeout(function () { isReplayingSync = false; }, 60);
     } else if (d.type === "rv:do_sync_input") {
       if (!syncActive) return;
-      var inp = null;
-      var inpSelectors = [d.selector, d.structuralSelector];
-      for (var i = 0; i < inpSelectors.length; i++) {
-        if (!inpSelectors[i]) continue;
-        try {
-          inp = document.querySelector(inpSelectors[i]);
-          if (inp) break;
-        } catch (_e) {}
-      }
-      if (!inp && d.id) inp = document.getElementById(d.id);
-      if (!inp && d.name) {
-        try { inp = document.querySelector(d.tag + '[name="' + safeIdent(d.name) + '"]'); } catch (_e) {}
-      }
+      var inp = findSyncedInputElement(d);
       if (inp) {
+        lastSyncedInputEl = inp;
         isReplayingSync = true;
         try {
-          if (d.inputType === "checkbox" || d.inputType === "radio") {
-            inp.checked = d.checked;
-          } else {
-            inp.value = d.value;
-          }
+          setInputElementValue(inp, d.value, d.checked, d.inputType);
           inp.dispatchEvent(new Event("input", { bubbles: true }));
           if (d.eventType === "change") {
             inp.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1978,6 +2114,33 @@
         } catch (_e) {}
         setTimeout(function () { isReplayingSync = false; }, 40);
       }
+    } else if (d.type === "rv:do_sync_submit") {
+      if (!syncActive) return;
+      if (Date.now() - lastSyncedSubmitAt <= 350) return;
+      lastSyncedSubmitAt = Date.now();
+      isReplayingSync = true;
+      try {
+        if (d.method === "get" && d.targetUrl && proxiable(d.targetUrl)) {
+          location.href = via(d.targetUrl);
+        } else {
+          var targetForm = null;
+          var formSels = [d.selector, d.structuralSelector];
+          for (var fi = 0; fi < formSels.length; fi++) {
+            if (!formSels[fi]) continue;
+            try {
+              targetForm = document.querySelector(formSels[fi]);
+              if (targetForm) break;
+            } catch (_e) {}
+          }
+          if (!targetForm && lastSyncedInputEl) {
+            targetForm = lastSyncedInputEl.form || (lastSyncedInputEl.closest && lastSyncedInputEl.closest("form"));
+          }
+          if (targetForm) {
+            triggerSyncedFormSubmission(targetForm);
+          }
+        }
+      } catch (_e) {}
+      setTimeout(function () { isReplayingSync = false; }, 60);
     } else if (d.type === "rv:run_diagnostics") {
       runVisualAudit(!!d.highlight);
       reportStorageSnapshot();
