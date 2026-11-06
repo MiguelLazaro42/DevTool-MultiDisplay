@@ -412,6 +412,12 @@ DROPPED_HEADERS = {
     "strict-transport-security",
     "date",
     "server",
+    "etag",
+    "last-modified",
+    "expires",
+    "age",
+    "cache-control",
+    "pragma",
 }
 
 META_CSP_RE = re.compile(
@@ -748,6 +754,8 @@ def _execute_proxy(url, frame_id, device):
         "Sec-CH-UA-Platform": platform_hint,
         "Viewport-Width": str(device.get("width", 1280)),
         "X-Device-Type": "mobile" if device.get("kind") == "phone" else ("tablet" if device.get("kind") == "tablet" else "desktop"),
+        "Cache-Control": "no-cache, no-store",
+        "Pragma": "no-cache",
     }
     for name in FORWARDED_REQUEST_HEADERS:
         if name in request.headers:
@@ -848,7 +856,9 @@ def _execute_proxy(url, frame_id, device):
         if name.lower() not in DROPPED_HEADERS and name.lower() != "content-type":
             resp.headers[name] = value
     resp.headers["Content-Type"] = content_type or "application/octet-stream"
-    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
@@ -878,16 +888,20 @@ def catch_all_relative_proxy(_err):
 
 @app.route("/api/reset", methods=["POST"])
 def reset():
-    """Borra todas las cookies: las del servidor (un jar por pantalla) y las
-    que el navegador guardó para este origen."""
+    """Borra todo el caché y las cookies: las sesiones del servidor (un jar por
+    pantalla), el caché HTTP del navegador y las cookies de este origen."""
     with _sessions_lock:
         cleared = len(_sessions)
         for session in _sessions.values():
             session.close()
         _sessions.clear()
 
+    with _storage_lock:
+        _client_storage_by_device.clear()
+
     resp = jsonify({"ok": True, "cleared_sessions": cleared})
-    resp.headers["Clear-Site-Data"] = '"cookies"'
+    resp.headers["Clear-Site-Data"] = '"cache", "cookies"'
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     # Respaldo para navegadores que ignoran Clear-Site-Data.
     for name in request.cookies:
         resp.delete_cookie(name)

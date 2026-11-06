@@ -1004,13 +1004,39 @@
     }
   });
 
-  // ---------- Refrescar (borra cookies) ----------
+  // ---------- Refrescar (borra caché, storage del sitio y cookies) ----------
   function clearDocumentCookies() {
     // Cookies que la página puso con JavaScript en este origen.
     document.cookie.split(";").forEach(function (c) {
       var name = c.split("=")[0].trim();
       if (name) document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
     });
+  }
+
+  function clearSiteCacheAndStorage() {
+    clearDocumentCookies();
+    // Limpiar localStorage y sessionStorage de la app probada (preservando preferencias rv.* del visor)
+    [window.localStorage, window.sessionStorage].forEach(function (st) {
+      if (!st) return;
+      try {
+        var toRemove = [];
+        for (var i = 0; i < st.length; i++) {
+          var k = st.key(i);
+          if (k && k.indexOf("rv.") !== 0) {
+            toRemove.push(k);
+          }
+        }
+        toRemove.forEach(function (k) { st.removeItem(k); });
+      } catch (_e) {}
+    });
+    // Limpiar CacheStorage (Service Workers / PWA caches) si existe
+    if (window.caches && typeof window.caches.keys === "function") {
+      try {
+        window.caches.keys().then(function (names) {
+          names.forEach(function (n) { window.caches.delete(n); });
+        }).catch(function () {});
+      } catch (_e) {}
+    }
   }
 
   refreshBtn.addEventListener("click", function () {
@@ -1024,7 +1050,7 @@
         return r.json();
       })
       .then(function () {
-        clearDocumentCookies();
+        clearSiteCacheAndStorage();
         if (!state.url) {
           toast(t("toastClearedNoUrl"));
           return;

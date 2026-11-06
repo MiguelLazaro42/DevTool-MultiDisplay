@@ -11,7 +11,7 @@ Entorno de visualización multi-dispositivo, sincronización interactiva y depur
 ### 1. Visualización multi-dispositivo y soporte multi-plantilla
 - **Barra de dirección**: escribe cualquier URL (`http://` o `https://`) y presiona Enter. Cada pantalla solicita el sitio a través del proxy local enviando su propio `User-Agent`, `Sec-CH-UA-Mobile`, `Sec-CH-UA-Platform`, `Viewport-Width` y `X-Device-Type`.
 - **Soporte para plantillas separadas (Móvil vs. Escritorio)**: si tu servidor entrega un HTML distinto según el dispositivo (por ejemplo, una plantilla exclusiva para móvil y otra para escritorio), cada visor recibe y renderiza su plantilla correspondiente.
-- **Sesiones aisladas o compartidas**: cada dispositivo mantiene su propio contenedor de cookies en el servidor. El botón **Refresh** recarga todas las pantallas y limpia las cookies de sesión y del navegador.
+- **Sesiones aisladas y limpieza completa de caché**: cada dispositivo mantiene su propio contenedor de cookies en el servidor. El botón **Refresh** (`borra caché y cookies`) recarga todas las pantallas purgando el caché HTTP del navegador (`Clear-Site-Data: "cache", "cookies"`), `CacheStorage` (Service Workers), `localStorage` / `sessionStorage` del sitio probado y todas las cookies de sesión.
 
 ### 2. Sincronización inteligente entre pantallas (`Sync`)
 - **Clics, formularios y teclado**: replica clics, escritura en campos de texto (`input` / `change`), envíos de formularios y pulsaciones de la tecla `Escape` en todas las vistas activas.
