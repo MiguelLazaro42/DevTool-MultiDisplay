@@ -10,7 +10,7 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=40">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=41">
 </head>
 
 <body>
@@ -498,6 +498,16 @@
         </svg>
         <span id="cert-btn-label" data-i18n="certBtn">.p12</span>
       </button>
+      <button type="button" class="btn btn-cert btn-perms" id="perms-btn"
+        title="Simulador de Ubicación GPS, Cámara, Micrófono y Permisos"
+        data-i18n-title="permsHint" aria-pressed="false">
+        <span class="cert-status-dot" id="perms-status-dot" aria-hidden="true"></span>
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M10 17s5-4.35 5-8.2A5 5 0 0 0 5 8.8C5 12.65 10 17 10 17Z" />
+          <circle cx="10" cy="8.8" r="1.8" />
+        </svg>
+        <span class="btn-ai-text" id="perms-btn-label" data-i18n="permsBtn">GPS</span>
+      </button>
     </div>
 
     <div class="bar bar-refresh" id="refresh-wrap">
@@ -592,6 +602,105 @@
     </div>
   </div>
 
+  <!-- Modal de Simulador de Ubicación GPS y Permisos (Cámara, Micrófono, Notificaciones) -->
+  <div class="ai-modal-backdrop" id="perms-modal" hidden>
+    <div class="ai-modal cert-modal-box perms-modal-box" role="dialog" aria-modal="true" aria-labelledby="perms-modal-title">
+      <header class="ai-modal-header">
+        <div class="ai-modal-title-wrap">
+          <span class="ai-modal-badge" id="perms-modal-badge">Sensores / GPS</span>
+          <h2 id="perms-modal-title" class="ai-modal-title">Simulador de Ubicación GPS y Permisos</h2>
+        </div>
+        <button type="button" class="traffic-btn-icon" id="perms-modal-close" aria-label="Cerrar">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M5 5l10 10M15 5L5 15" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="cert-modal-body perms-modal-body">
+        <div class="cert-form-group">
+          <label class="cert-label" for="perms-geo-mode">1. Ubicación GPS (<code>navigator.geolocation</code>)</label>
+          <select id="perms-geo-mode" class="cert-input-text">
+            <option value="real">Real (Usar ubicación del navegador / Mac)</option>
+            <option value="mock">Simular coordenadas GPS (Permitir automáticamente)</option>
+            <option value="block">Bloquear (Simular Permiso Denegado — Error código 1)</option>
+          </select>
+
+          <div class="perms-geo-fields" id="perms-geo-fields">
+            <div class="perms-row">
+              <div class="perms-col">
+                <span class="cert-help">Ubicación predefinida:</span>
+                <select id="perms-geo-preset" class="cert-input-text">
+                  <option value="carmen">Ciudad del Carmen, Camp. (18.6414, -91.8256)</option>
+                  <option value="campeche">Campeche, Camp. (19.8301, -90.5349)</option>
+                  <option value="merida">Mérida, Yuc. (20.9674, -89.5926)</option>
+                  <option value="cancun">Cancún, Q. Roo (21.1619, -86.8515)</option>
+                  <option value="cdmx">Ciudad de México — CDMX (19.4326, -99.1332)</option>
+                  <option value="monterrey">Monterrey, N.L. (25.6866, -100.3161)</option>
+                  <option value="guadalajara">Guadalajara, Jal. (20.6597, -103.3496)</option>
+                  <option value="madrid">Madrid, España (40.4168, -3.7038)</option>
+                  <option value="miami">Miami, EE.UU. (25.7617, -80.1918)</option>
+                  <option value="custom">Coordenadas personalizadas…</option>
+                </select>
+              </div>
+            </div>
+            <div class="perms-coords-grid">
+              <div>
+                <span class="cert-help">Latitud:</span>
+                <input type="number" step="0.0001" id="perms-lat" class="cert-input-text" value="18.6414">
+              </div>
+              <div>
+                <span class="cert-help">Longitud:</span>
+                <input type="number" step="0.0001" id="perms-lng" class="cert-input-text" value="-91.8256">
+              </div>
+              <div>
+                <span class="cert-help">Precisión (m):</span>
+                <input type="number" step="1" min="1" id="perms-acc" class="cert-input-text" value="12">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="perms-sensors-grid">
+          <div class="cert-form-group">
+            <label class="cert-label" for="perms-camera">2. Cámara (<code>getUserMedia video</code>)</label>
+            <select id="perms-camera" class="cert-input-text">
+              <option value="real">Real (Usar cámara de la Mac)</option>
+              <option value="mock">Simular Cámara Virtual (Stream de prueba en vivo)</option>
+              <option value="block">Bloquear (Simular NotAllowedError)</option>
+            </select>
+          </div>
+
+          <div class="cert-form-group">
+            <label class="cert-label" for="perms-mic">3. Micrófono (<code>getUserMedia audio</code>)</label>
+            <select id="perms-mic" class="cert-input-text">
+              <option value="real">Real (Usar micrófono de la Mac)</option>
+              <option value="mock">Simular Micrófono Virtual (Pista de audio activa)</option>
+              <option value="block">Bloquear (Simular NotAllowedError)</option>
+            </select>
+          </div>
+
+          <div class="cert-form-group">
+            <label class="cert-label" for="perms-notif">4. Notificaciones (<code>window.Notification</code>)</label>
+            <select id="perms-notif" class="cert-input-text">
+              <option value="real">Real (Permiso nativo del navegador)</option>
+              <option value="mock">Permitir siempre (Mostrar notificaciones en el visor)</option>
+              <option value="block">Bloquear (Simular permiso denegado)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <footer class="ai-modal-footer">
+        <span class="ai-modal-hint">Se aplica en tiempo real a todas las pantallas y pestañas sin recargar.</span>
+        <div class="ai-modal-actions">
+          <button type="button" class="traffic-btn" id="perms-reset-btn">Restaurar todo a Real</button>
+          <button type="button" class="traffic-btn traffic-btn-ai" id="perms-apply-btn">Aplicar permisos y GPS</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
   <!-- Modal de Reporte de Contexto (copia en 1 clic + personalización + captura PNG) -->
   <div class="ai-modal-backdrop" id="ai-report-modal" hidden>
     <div class="ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-modal-title">
@@ -641,8 +750,8 @@
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
   <script id="workspace-data" type="application/json">{{ workspace|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=40"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=40"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=41"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=41"></script>
 </body>
 
 </html>

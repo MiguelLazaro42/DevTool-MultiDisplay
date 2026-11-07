@@ -192,6 +192,50 @@
   var certApplyBtn = document.getElementById("cert-apply-btn");
   var certRemoveBtn = document.getElementById("cert-remove-btn");
 
+  // Modal de Ubicación GPS y Permisos (Cámara, Micrófono, Notificaciones)
+  var permsBtn = document.getElementById("perms-btn");
+  var permsStatusDot = document.getElementById("perms-status-dot");
+  var permsModal = document.getElementById("perms-modal");
+  var permsModalClose = document.getElementById("perms-modal-close");
+  var permsGeoMode = document.getElementById("perms-geo-mode");
+  var permsGeoPresetGroup = document.getElementById("perms-geo-preset-group");
+  var permsGeoPreset = document.getElementById("perms-geo-preset");
+  var permsCoordsGrid = document.getElementById("perms-coords-grid");
+  var permsLatInput = document.getElementById("perms-lat");
+  var permsLngInput = document.getElementById("perms-lng");
+  var permsAccInput = document.getElementById("perms-acc");
+  var permsCameraSelect = document.getElementById("perms-camera");
+  var permsMicSelect = document.getElementById("perms-mic");
+  var permsNotifSelect = document.getElementById("perms-notif");
+  var permsResetBtn = document.getElementById("perms-reset-btn");
+  var permsApplyBtn = document.getElementById("perms-apply-btn");
+  var STORE_PERMS = "rv.permissions";
+
+  var GEO_PRESETS = {
+    carmen: { lat: 18.6414, lng: -91.8256, label: "Ciudad del Carmen, Camp." },
+    campeche: { lat: 19.8301, lng: -90.5349, label: "San Francisco de Campeche" },
+    merida: { lat: 20.9674, lng: -89.5926, label: "Mérida, Yuc." },
+    cancun: { lat: 21.1619, lng: -86.8515, label: "Cancún, Q. Roo" },
+    cdmx: { lat: 19.4326, lng: -99.1332, label: "Ciudad de México (Zócalo)" },
+    monterrey: { lat: 25.6866, lng: -100.3161, label: "Monterrey, N.L." },
+    guadalajara: { lat: 20.6597, lng: -103.3496, label: "Guadalajara, Jal." },
+    madrid: { lat: 40.4168, lng: -3.7038, label: "Madrid, España" },
+    miami: { lat: 25.7617, lng: -80.1918, label: "Miami, EE.UU." }
+  };
+
+  var DEFAULT_PERMS = {
+    geo_mode: "real",
+    geo_preset: "carmen",
+    lat: 18.6414,
+    lng: -91.8256,
+    accuracy: 15,
+    camera: "real",
+    microphone: "real",
+    notifications: "real"
+  };
+
+  var permsState = Object.assign({}, DEFAULT_PERMS);
+
   var trafficState = {
     open: false,
     panelMode: "traffic",
@@ -418,6 +462,7 @@
     if (state.url) payload.url = state.url;
     payload.sync = !!state.sync;
     payload.inspector = !!state.inspector;
+    if (permsState) payload.permissions = permsState;
     if (Array.isArray(state.tabs) && state.tabs.length) {
       payload.tabs = state.tabs.map(function (tb, idx) {
         return {
@@ -616,6 +661,7 @@
       fetchTraffic();
       try {
         iframe.contentWindow.postMessage({ type: "rv:set_sync", active: state.sync }, location.origin);
+        iframe.contentWindow.postMessage({ type: "rv:set_permissions", permissions: permsState }, location.origin);
         if (state.inspector) {
           iframe.contentWindow.postMessage({ type: "rv:set_inspector", active: true }, location.origin);
         }
@@ -985,6 +1031,7 @@
         try {
           if (ifr.contentWindow) {
             ifr.contentWindow.postMessage({ type: "rv:set_sync", active: state.sync }, location.origin);
+            ifr.contentWindow.postMessage({ type: "rv:set_permissions", permissions: permsState }, location.origin);
             ifr.contentWindow.postMessage({ type: "rv:set_inspector", active: state.inspector }, location.origin);
             ifr.contentWindow.postMessage({ type: "rv:set_audit_highlight", active: auditState.highlightOnScreens }, location.origin);
           }
@@ -2401,6 +2448,10 @@
       };
       broadcastToOtherFrames(d.frame, submitPayload);
       postCrossTab({ type: "bc:sync_submit", payload: submitPayload });
+    } else if (d.type === "rv:sim_notification") {
+      var notifDev = (d.frame && BY_ID[d.frame]) ? BY_ID[d.frame].name : (d.frame || "Dispositivo");
+      var notifTitle = String(d.title || "Notificación") + (d.body ? (" — " + String(d.body)) : "");
+      toast(t("simNotificationToast", { device: notifDev, title: notifTitle }));
     }
   });
 
@@ -2556,6 +2607,10 @@
       toggleInspector(msg.active, true);
       return;
     }
+    if (msg.type === "bc:set_permissions" && msg.permissions && typeof msg.permissions === "object") {
+      applyPermissionsConfig(msg.permissions, true, true);
+      return;
+    }
     if (msg.type === "bc:set_audit_highlight" && typeof msg.active === "boolean") {
       toggleAuditHighlight(msg.active, true);
       return;
@@ -2695,6 +2750,9 @@
           }
           if (typeof ws.inspector === "boolean" && ws.inspector !== state.inspector) {
             toggleInspector(ws.inspector, true);
+          }
+          if (ws.permissions && typeof ws.permissions === "object") {
+            applyPermissionsConfig(ws.permissions, true, true);
           }
           if (Array.isArray(ws.tabs) && ws.tabs.length > state.tabs.length) {
             applyRemoteTabsState(ws.tabs, ws.active_tab_id);
@@ -6220,6 +6278,171 @@
   }
 
   fetchCertStatus();
+
+  // ---------- Simulador de Ubicación GPS y Permisos (Cámara, Micrófono, Notificaciones) ----------
+  function sanitizePermissionsConfig(raw) {
+    var base = Object.assign({}, DEFAULT_PERMS);
+    if (!raw || typeof raw !== "object") return base;
+    if (raw.geo_mode === "real" || raw.geo_mode === "mock" || raw.geo_mode === "block") {
+      base.geo_mode = raw.geo_mode;
+    }
+    if (typeof raw.geo_preset === "string" && raw.geo_preset) {
+      base.geo_preset = raw.geo_preset;
+    }
+    if (raw.lat !== undefined && !isNaN(Number(raw.lat))) {
+      base.lat = Number(raw.lat);
+    }
+    if (raw.lng !== undefined && !isNaN(Number(raw.lng))) {
+      base.lng = Number(raw.lng);
+    }
+    if (raw.accuracy !== undefined && !isNaN(Number(raw.accuracy))) {
+      base.accuracy = Math.max(1, Number(raw.accuracy));
+    }
+    if (raw.camera === "real" || raw.camera === "mock" || raw.camera === "block") {
+      base.camera = raw.camera;
+    }
+    if (raw.microphone === "real" || raw.microphone === "mock" || raw.microphone === "block") {
+      base.microphone = raw.microphone;
+    }
+    if (raw.notifications === "real" || raw.notifications === "mock" || raw.notifications === "block") {
+      base.notifications = raw.notifications;
+    }
+    return base;
+  }
+
+  function updatePermsButtonUI() {
+    if (!permsBtn) return;
+    var hasMock = (
+      permsState.geo_mode === "mock" ||
+      permsState.camera === "mock" ||
+      permsState.microphone === "mock" ||
+      permsState.notifications === "mock"
+    );
+    var hasBlock = (
+      permsState.geo_mode === "block" ||
+      permsState.camera === "block" ||
+      permsState.microphone === "block" ||
+      permsState.notifications === "block"
+    );
+    permsBtn.classList.toggle("is-mock", hasMock);
+    permsBtn.classList.toggle("is-block", !hasMock && hasBlock);
+    permsBtn.setAttribute("aria-pressed", (hasMock || hasBlock) ? "true" : "false");
+  }
+
+  function updatePermsModalVisibility() {
+    if (!permsGeoMode) return;
+    var isMockGeo = permsGeoMode.value === "mock";
+    if (permsGeoPresetGroup) permsGeoPresetGroup.style.display = isMockGeo ? "" : "none";
+    if (permsCoordsGrid) permsCoordsGrid.style.display = isMockGeo ? "" : "none";
+  }
+
+  function syncPermsModalInputs() {
+    if (permsGeoMode) permsGeoMode.value = permsState.geo_mode || "real";
+    if (permsGeoPreset) {
+      var presetKey = permsState.geo_preset || "carmen";
+      permsGeoPreset.value = (GEO_PRESETS[presetKey] || presetKey === "custom") ? presetKey : "custom";
+    }
+    if (permsLatInput) permsLatInput.value = String(permsState.lat);
+    if (permsLngInput) permsLngInput.value = String(permsState.lng);
+    if (permsAccInput) permsAccInput.value = String(permsState.accuracy || 15);
+    if (permsCameraSelect) permsCameraSelect.value = permsState.camera || "real";
+    if (permsMicSelect) permsMicSelect.value = permsState.microphone || "real";
+    if (permsNotifSelect) permsNotifSelect.value = permsState.notifications || "real";
+    updatePermsModalVisibility();
+  }
+
+  function applyPermissionsConfig(nextCfg, fromCrossTab, silent) {
+    permsState = sanitizePermissionsConfig(nextCfg);
+    store(STORE_PERMS, permsState);
+    if (WORKSPACE) WORKSPACE.permissions = Object.assign({}, permsState);
+    updatePermsButtonUI();
+    syncPermsModalInputs();
+
+    postToAllDeviceTabIframes({
+      type: "rv:set_permissions",
+      permissions: permsState
+    });
+
+    if (!fromCrossTab) {
+      persistWorkspaceToServer({ permissions: permsState });
+      postCrossTab({
+        type: "bc:set_permissions",
+        permissions: permsState
+      });
+    }
+    if (!silent) {
+      toast(t("permsSavedToast"));
+    }
+  }
+
+  (function initPermsState() {
+    var localPerms = load(STORE_PERMS);
+    var serverPerms = (WORKSPACE && WORKSPACE.permissions && typeof WORKSPACE.permissions === "object")
+      ? WORKSPACE.permissions
+      : null;
+    permsState = sanitizePermissionsConfig(localPerms || serverPerms || DEFAULT_PERMS);
+    store(STORE_PERMS, permsState);
+    updatePermsButtonUI();
+    syncPermsModalInputs();
+  })();
+
+  if (permsBtn) {
+    permsBtn.addEventListener("click", function () {
+      syncPermsModalInputs();
+      if (permsModal) permsModal.hidden = false;
+    });
+  }
+  if (permsModalClose) {
+    permsModalClose.addEventListener("click", function () {
+      if (permsModal) permsModal.hidden = true;
+    });
+  }
+  if (permsModal) {
+    permsModal.addEventListener("click", function (ev) {
+      if (ev.target === permsModal) permsModal.hidden = true;
+    });
+  }
+  if (permsGeoMode) {
+    permsGeoMode.addEventListener("change", updatePermsModalVisibility);
+  }
+  if (permsGeoPreset) {
+    permsGeoPreset.addEventListener("change", function () {
+      var p = GEO_PRESETS[permsGeoPreset.value];
+      if (p) {
+        if (permsLatInput) permsLatInput.value = String(p.lat);
+        if (permsLngInput) permsLngInput.value = String(p.lng);
+      }
+    });
+  }
+  function onManualCoordEdit() {
+    if (permsGeoPreset) permsGeoPreset.value = "custom";
+  }
+  if (permsLatInput) permsLatInput.addEventListener("input", onManualCoordEdit);
+  if (permsLngInput) permsLngInput.addEventListener("input", onManualCoordEdit);
+
+  if (permsApplyBtn) {
+    permsApplyBtn.addEventListener("click", function () {
+      var nextCfg = {
+        geo_mode: permsGeoMode ? permsGeoMode.value : "real",
+        geo_preset: permsGeoPreset ? permsGeoPreset.value : "custom",
+        lat: permsLatInput ? parseFloat(permsLatInput.value) : DEFAULT_PERMS.lat,
+        lng: permsLngInput ? parseFloat(permsLngInput.value) : DEFAULT_PERMS.lng,
+        accuracy: permsAccInput ? parseFloat(permsAccInput.value) : DEFAULT_PERMS.accuracy,
+        camera: permsCameraSelect ? permsCameraSelect.value : "real",
+        microphone: permsMicSelect ? permsMicSelect.value : "real",
+        notifications: permsNotifSelect ? permsNotifSelect.value : "real"
+      };
+      applyPermissionsConfig(nextCfg, false, false);
+      if (permsModal) permsModal.hidden = true;
+    });
+  }
+  if (permsResetBtn) {
+    permsResetBtn.addEventListener("click", function () {
+      applyPermissionsConfig(DEFAULT_PERMS, false, true);
+      if (permsModal) permsModal.hidden = true;
+      toast(t("permsResetToast"));
+    });
+  }
 
   // ---------- Menú Agregar dispositivo ----------
   var secondaryBarWrap = null;

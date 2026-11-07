@@ -136,7 +136,12 @@
       refreshOnlyThisTabSub: "Keeps sessions in other tabs active",
       refreshAllTabs: "Clear & reload all tabs ({n})",
       refreshAllTabsSub: "Clears cookies & sessions across all tabs",
-      toastClearedTab: "Tab {num} session & cookies cleared. Reloaded."
+      toastClearedTab: "Tab {num} session & cookies cleared. Reloaded.",
+      permsBtn: "GPS",
+      permsHint: "Simulate or manage Geolocation (GPS), Camera, Microphone and Notification permissions across all devices",
+      permsSavedToast: "GPS & Permissions applied across all devices.",
+      permsResetToast: "Permissions restored to real browser mode.",
+      simNotificationToast: "Notification ({device}): {title}"
     },
     es: {
       screens: "Pantallas",
@@ -269,7 +274,12 @@
       refreshOnlyThisTabSub: "Limpia cookies/sesión solo aquí; conserva las demás pestañas",
       refreshAllTabs: "Todas las pestañas ({n})",
       refreshAllTabsSub: "Borra cookies, caché y sesiones de todas las pestañas",
-      toastClearedTab: "Sesión y cookies de Pestaña {num} limpiadas y recargadas."
+      toastClearedTab: "Sesión y cookies de Pestaña {num} limpiadas y recargadas.",
+      permsBtn: "GPS",
+      permsHint: "Simular o gestionar permisos de Ubicación GPS, Cámara, Micrófono y Notificaciones en todos los dispositivos",
+      permsSavedToast: "Ubicación GPS y permisos aplicados en todos los dispositivos.",
+      permsResetToast: "Permisos restaurados al modo real del navegador.",
+      simNotificationToast: "Notificación ({device}): {title}"
     }
   };
 

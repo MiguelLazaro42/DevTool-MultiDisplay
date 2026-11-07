@@ -63,6 +63,16 @@ _workspace_state = {
     "inspector": False,
     "zoom_mode": "fill",
     "stack_mode": "auto",
+    "permissions": {
+        "geo_mode": "real",
+        "geo_preset": "carmen",
+        "lat": 18.6414,
+        "lng": -91.8256,
+        "accuracy": 12,
+        "camera": "real",
+        "microphone": "real",
+        "notifications": "real",
+    },
 }
 
 _sync_bus_lock = threading.Lock()
@@ -325,6 +335,18 @@ def load_persisted_workspace():
                 _workspace_state["zoom_mode"] = data["zoom_mode"]
             if data.get("stack_mode") in ("auto", "stack"):
                 _workspace_state["stack_mode"] = data["stack_mode"]
+            if isinstance(data.get("permissions"), dict):
+                p = data["permissions"]
+                _workspace_state["permissions"] = {
+                    "geo_mode": p.get("geo_mode") if p.get("geo_mode") in ("real", "mock", "block") else "real",
+                    "geo_preset": str(p.get("geo_preset") or "carmen")[:40],
+                    "lat": float(p.get("lat", 18.6414)),
+                    "lng": float(p.get("lng", -91.8256)),
+                    "accuracy": max(1.0, float(p.get("accuracy", 12))),
+                    "camera": p.get("camera") if p.get("camera") in ("real", "mock", "block") else "real",
+                    "microphone": p.get("microphone") if p.get("microphone") in ("real", "mock", "block") else "real",
+                    "notifications": p.get("notifications") if p.get("notifications") in ("real", "mock", "block") else "real",
+                }
     except Exception:
         pass
 
@@ -366,6 +388,21 @@ def save_persisted_workspace(updates):
             _workspace_state["zoom_mode"] = updates["zoom_mode"]
         if updates.get("stack_mode") in ("auto", "stack"):
             _workspace_state["stack_mode"] = updates["stack_mode"]
+        if isinstance(updates.get("permissions"), dict):
+            p = updates["permissions"]
+            try:
+                _workspace_state["permissions"] = {
+                    "geo_mode": p.get("geo_mode") if p.get("geo_mode") in ("real", "mock", "block") else "real",
+                    "geo_preset": str(p.get("geo_preset") or "carmen")[:40],
+                    "lat": float(p.get("lat", 18.6414)),
+                    "lng": float(p.get("lng", -91.8256)),
+                    "accuracy": max(1.0, float(p.get("accuracy", 12))),
+                    "camera": p.get("camera") if p.get("camera") in ("real", "mock", "block") else "real",
+                    "microphone": p.get("microphone") if p.get("microphone") in ("real", "mock", "block") else "real",
+                    "notifications": p.get("notifications") if p.get("notifications") in ("real", "mock", "block") else "real",
+                }
+            except Exception:
+                pass
         snapshot = dict(_workspace_state)
         try:
             with open(WORKSPACE_STATE_PATH, "w", encoding="utf-8") as wf:
@@ -737,11 +774,14 @@ def frame_script(frame_id, device_id, cert_proxy_assets=False, base_url=""):
     peticiones sigan pasando por el proxy (ver static/js/frame-inject.js)."""
     with open(FRAME_INJECT_PATH, encoding="utf-8") as f:
         source = f.read()
+    with _workspace_lock:
+        perms_cfg = dict(_workspace_state.get("permissions") or {})
     source = (
         source.replace("__FRAME__", json.dumps(frame_id))
         .replace("__DEVICE__", json.dumps(device_id))
         .replace("__CERT_ACTIVE__", "true" if cert_proxy_assets else "false")
         .replace("__BASE_URL__", json.dumps(base_url or ""))
+        .replace("__PERMS_CONFIG__", json.dumps(perms_cfg))
     )
     return "<script>" + source.replace("</", "<\\/") + "</script>"
 

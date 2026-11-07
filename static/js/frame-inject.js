@@ -124,6 +124,406 @@
     } catch (_e) {}
   })();
 
+  // ---------- Simulador de Permisos y Sensores (GPS, Cámara, Micrófono, Notificaciones) ----------
+  var permsConfig = (typeof __PERMS_CONFIG__ === "object" && __PERMS_CONFIG__) ? __PERMS_CONFIG__ : {
+    geo_mode: "real",
+    geo_preset: "carmen",
+    lat: 18.6414,
+    lng: -91.8256,
+    accuracy: 12,
+    camera: "real",
+    microphone: "real",
+    notifications: "real"
+  };
+  try {
+    var savedPermsRaw = window.localStorage && window.localStorage.getItem("rv.permissions");
+    if (savedPermsRaw) {
+      var parsedPerms = JSON.parse(savedPermsRaw);
+      if (parsedPerms && typeof parsedPerms === "object") {
+        permsConfig = Object.assign({}, permsConfig, parsedPerms);
+      }
+    }
+  } catch (_e) {}
+
+  var activeGeoWatches = {};
+  var nextGeoWatchId = 5000;
+  var trackedPermissionStatuses = [];
+
+  function buildSimulatedGeoPosition() {
+    var latNum = parseFloat(permsConfig.lat);
+    var lngNum = parseFloat(permsConfig.lng);
+    var accNum = Math.max(1, parseFloat(permsConfig.accuracy) || 12);
+    if (isNaN(latNum)) latNum = 18.6414;
+    if (isNaN(lngNum)) lngNum = -91.8256;
+    var coordsObj = {
+      latitude: latNum,
+      longitude: lngNum,
+      accuracy: accNum,
+      altitude: null,
+      altitudeAccuracy: null,
+      heading: null,
+      speed: null,
+      toJSON: function () {
+        return {
+          latitude: latNum,
+          longitude: lngNum,
+          accuracy: accNum,
+          altitude: null,
+          altitudeAccuracy: null,
+          heading: null,
+          speed: null
+        };
+      }
+    };
+    return {
+      coords: coordsObj,
+      timestamp: Date.now(),
+      toJSON: function () {
+        return { coords: coordsObj.toJSON(), timestamp: Date.now() };
+      }
+    };
+  }
+
+  function buildSimulatedGeoError() {
+    return {
+      code: 1,
+      message: "User denied Geolocation (Simulated by Responsive Viewer)",
+      PERMISSION_DENIED: 1,
+      POSITION_UNAVAILABLE: 2,
+      TIMEOUT: 3
+    };
+  }
+
+  function getSimulatedPermissionState(permName) {
+    var mode = "real";
+    if (permName === "geolocation") mode = permsConfig.geo_mode || "real";
+    else if (permName === "camera") mode = permsConfig.camera || "real";
+    else if (permName === "microphone") mode = permsConfig.microphone || "real";
+    else if (permName === "notifications" || permName === "push") mode = permsConfig.notifications || "real";
+    if (mode === "mock") return "granted";
+    if (mode === "block") return "denied";
+    return null;
+  }
+
+  function applyUpdatedPermissionsConfig(newCfg) {
+    if (!newCfg || typeof newCfg !== "object") return;
+    permsConfig = Object.assign({}, permsConfig, newCfg);
+
+    // Actualizar objetos PermissionStatus suscritos por la página
+    trackedPermissionStatuses.forEach(function (entry) {
+      var nextState = getSimulatedPermissionState(entry.name);
+      if (nextState && entry.statusObj.state !== nextState) {
+        entry.statusObj.state = nextState;
+        try {
+          if (typeof entry.statusObj.onchange === "function") {
+            entry.statusObj.onchange(new Event("change"));
+          }
+          entry.listeners.forEach(function (fn) {
+            try { fn.call(entry.statusObj, new Event("change")); } catch (_e) {}
+          });
+        } catch (_e) {}
+      }
+    });
+
+    // Notificar a watchPosition activos si el GPS está en modo simulado o bloqueado
+    Object.keys(activeGeoWatches).forEach(function (wid) {
+      var w = activeGeoWatches[wid];
+      if (!w) return;
+      if (permsConfig.geo_mode === "mock" && typeof w.success === "function") {
+        try { w.success(buildSimulatedGeoPosition()); } catch (_e) {}
+      } else if (permsConfig.geo_mode === "block" && typeof w.error === "function") {
+        try { w.error(buildSimulatedGeoError()); } catch (_e) {}
+      }
+    });
+  }
+
+  function buildSyntheticMediaStream(wantVideo, wantAudio) {
+    var tracks = [];
+    if (wantVideo) {
+      var cv = document.createElement("canvas");
+      cv.width = 640;
+      cv.height = 480;
+      var ctx = cv.getContext("2d");
+      var drawFrame = function () {
+        if (!ctx) return;
+        ctx.fillStyle = "#0F172A";
+        ctx.fillRect(0, 0, cv.width, cv.height);
+        ctx.strokeStyle = "#1E293B";
+        ctx.lineWidth = 2;
+        for (var x = 0; x < cv.width; x += 40) {
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, cv.height); ctx.stroke();
+        }
+        for (var y = 0; y < cv.height; y += 40) {
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cv.width, y); ctx.stroke();
+        }
+        ctx.fillStyle = "#38BDF8";
+        ctx.font = "600 22px system-ui, -apple-system, sans-serif";
+        ctx.fillText("CÁMARA SIMULADA · " + String(D || "device").toUpperCase(), 36, 64);
+        ctx.fillStyle = "#E2E8F0";
+        ctx.font = "500 16px system-ui, -apple-system, sans-serif";
+        ctx.fillText("Hora: " + new Date().toLocaleTimeString(), 36, 102);
+        ctx.fillText("GPS: " + Number(permsConfig.lat || 0).toFixed(4) + ", " + Number(permsConfig.lng || 0).toFixed(4), 36, 132);
+        var t = Date.now() / 600;
+        var cx = 320 + Math.cos(t) * 110;
+        var cy = 280 + Math.sin(t) * 65;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 34, 0, Math.PI * 2);
+        ctx.fillStyle = "#22C55E";
+        ctx.fill();
+      };
+      drawFrame();
+      var intervalId = setInterval(drawFrame, 100);
+      if (typeof cv.captureStream === "function") {
+        var vStream = cv.captureStream(15);
+        var vTracks = vStream.getVideoTracks();
+        for (var i = 0; i < vTracks.length; i++) {
+          var vt = vTracks[i];
+          var origStop = vt.stop;
+          vt.stop = function () {
+            clearInterval(intervalId);
+            if (origStop) origStop.call(vt);
+          };
+          tracks.push(vt);
+        }
+      }
+    }
+    if (wantAudio) {
+      try {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          var actx = new AudioCtx();
+          var dst = actx.createMediaStreamDestination();
+          var aTracks = dst.stream.getAudioTracks();
+          for (var j = 0; j < aTracks.length; j++) {
+            tracks.push(aTracks[j]);
+          }
+        }
+      } catch (_e) {}
+    }
+    return new MediaStream(tracks);
+  }
+
+  (function setupPermissionsAndSensorSimulator() {
+    // 1. Geolocation (navigator.geolocation)
+    try {
+      var geo = navigator.geolocation || {};
+      var origGetPos = geo.getCurrentPosition ? geo.getCurrentPosition.bind(geo) : null;
+      var origWatchPos = geo.watchPosition ? geo.watchPosition.bind(geo) : null;
+      var origClearWatch = geo.clearWatch ? geo.clearWatch.bind(geo) : null;
+
+      var customGeo = {
+        getCurrentPosition: function (successCb, errorCb, options) {
+          var mode = permsConfig.geo_mode || "real";
+          if (mode === "mock") {
+            setTimeout(function () {
+              if (typeof successCb === "function") {
+                try { successCb(buildSimulatedGeoPosition()); } catch (_e) {}
+              }
+            }, 35);
+            return;
+          }
+          if (mode === "block") {
+            setTimeout(function () {
+              if (typeof errorCb === "function") {
+                try { errorCb(buildSimulatedGeoError()); } catch (_e) {}
+              }
+            }, 35);
+            return;
+          }
+          if (origGetPos) {
+            return origGetPos(successCb, errorCb, options);
+          }
+        },
+        watchPosition: function (successCb, errorCb, options) {
+          var mode = permsConfig.geo_mode || "real";
+          if (mode === "mock" || mode === "block") {
+            var wid = ++nextGeoWatchId;
+            activeGeoWatches[wid] = { success: successCb, error: errorCb };
+            setTimeout(function () {
+              if (!activeGeoWatches[wid]) return;
+              if ((permsConfig.geo_mode || "real") === "mock" && typeof successCb === "function") {
+                try { successCb(buildSimulatedGeoPosition()); } catch (_e) {}
+              } else if ((permsConfig.geo_mode || "real") === "block" && typeof errorCb === "function") {
+                try { errorCb(buildSimulatedGeoError()); } catch (_e) {}
+              }
+            }, 35);
+            return wid;
+          }
+          if (origWatchPos) {
+            return origWatchPos(successCb, errorCb, options);
+          }
+          return 0;
+        },
+        clearWatch: function (wid) {
+          if (activeGeoWatches[wid]) {
+            delete activeGeoWatches[wid];
+            return;
+          }
+          if (origClearWatch) {
+            return origClearWatch(wid);
+          }
+        }
+      };
+
+      try {
+        Object.defineProperty(navigator, "geolocation", {
+          configurable: true,
+          enumerable: true,
+          get: function () { return customGeo; }
+        });
+      } catch (_e) {
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition = customGeo.getCurrentPosition;
+          navigator.geolocation.watchPosition = customGeo.watchPosition;
+          navigator.geolocation.clearWatch = customGeo.clearWatch;
+        }
+      }
+    } catch (_e) {}
+
+    // 2. Cámara y Micrófono (navigator.mediaDevices.getUserMedia & enumerateDevices)
+    try {
+      if (navigator.mediaDevices) {
+        var origGUM = navigator.mediaDevices.getUserMedia
+          ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+          : null;
+        var origEnum = navigator.mediaDevices.enumerateDevices
+          ? navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices)
+          : null;
+
+        navigator.mediaDevices.getUserMedia = function (constraints) {
+          var c = constraints || {};
+          var wantV = !!c.video;
+          var wantA = !!c.audio;
+          var camMode = permsConfig.camera || "real";
+          var micMode = permsConfig.microphone || "real";
+
+          if ((wantV && camMode === "block") || (wantA && micMode === "block")) {
+            return Promise.reject(new DOMException("Permission denied (Simulated by Responsive Viewer)", "NotAllowedError"));
+          }
+          if ((wantV && camMode === "mock") || (wantA && micMode === "mock")) {
+            try {
+              var stream = buildSyntheticMediaStream(wantV, wantA);
+              return Promise.resolve(stream);
+            } catch (err) {
+              return Promise.reject(err);
+            }
+          }
+          if (origGUM) {
+            return origGUM(constraints);
+          }
+          return Promise.reject(new DOMException("MediaDevices not available", "NotSupportedError"));
+        };
+
+        if (origEnum) {
+          navigator.mediaDevices.enumerateDevices = function () {
+            var camMode = permsConfig.camera || "real";
+            var micMode = permsConfig.microphone || "real";
+            if (camMode === "mock" || micMode === "mock") {
+              return Promise.resolve([
+                { deviceId: "rv-virtual-cam", kind: "videoinput", label: "Responsive Viewer Virtual Camera (" + D + ")", groupId: "rv-group-1", toJSON: function () { return this; } },
+                { deviceId: "rv-virtual-mic", kind: "audioinput", label: "Responsive Viewer Virtual Microphone (" + D + ")", groupId: "rv-group-1", toJSON: function () { return this; } }
+              ]);
+            }
+            return origEnum();
+          };
+        }
+      }
+    } catch (_e) {}
+
+    // 3. Notificaciones (window.Notification)
+    try {
+      var OrigNotification = window.Notification;
+      if (OrigNotification) {
+        var CustomNotification = function (title, options) {
+          var nMode = permsConfig.notifications || "real";
+          if (nMode === "block") {
+            throw new TypeError("Notification permission has been blocked (Simulated by Responsive Viewer)");
+          }
+          if (nMode === "mock") {
+            var evTarget = {
+              title: String(title || ""),
+              body: (options && options.body) ? String(options.body) : "",
+              onclick: null,
+              onclose: null,
+              close: function () {
+                if (typeof this.onclose === "function") this.onclose();
+              },
+              addEventListener: function () {},
+              removeEventListener: function () {}
+            };
+            try {
+              parent.postMessage({
+                type: "rv:sim_notification",
+                frame: F,
+                device: D,
+                title: evTarget.title,
+                body: evTarget.body
+              }, ORIGIN);
+            } catch (_e) {}
+            return evTarget;
+          }
+          return new OrigNotification(title, options);
+        };
+
+        Object.defineProperty(CustomNotification, "permission", {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            var nMode = permsConfig.notifications || "real";
+            if (nMode === "mock") return "granted";
+            if (nMode === "block") return "denied";
+            return OrigNotification.permission;
+          }
+        });
+
+        CustomNotification.requestPermission = function (cb) {
+          var nMode = permsConfig.notifications || "real";
+          if (nMode === "mock" || nMode === "block") {
+            var res = nMode === "mock" ? "granted" : "denied";
+            if (typeof cb === "function") {
+              try { cb(res); } catch (_e) {}
+            }
+            return Promise.resolve(res);
+          }
+          return OrigNotification.requestPermission(cb);
+        };
+
+        window.Notification = CustomNotification;
+      }
+    } catch (_e) {}
+
+    // 4. API navigator.permissions.query
+    try {
+      if (navigator.permissions && typeof navigator.permissions.query === "function") {
+        var origPermQuery = navigator.permissions.query.bind(navigator.permissions);
+        navigator.permissions.query = function (desc) {
+          var pName = (desc && desc.name) ? String(desc.name).toLowerCase() : "";
+          var simState = getSimulatedPermissionState(pName);
+          if (simState) {
+            var listeners = [];
+            var statusObj = {
+              name: pName,
+              state: simState,
+              onchange: null,
+              addEventListener: function (type, fn) {
+                if (type === "change" && typeof fn === "function") listeners.push(fn);
+              },
+              removeEventListener: function (type, fn) {
+                if (type === "change") {
+                  var idx = listeners.indexOf(fn);
+                  if (idx > -1) listeners.splice(idx, 1);
+                }
+              }
+            };
+            trackedPermissionStatuses.push({ name: pName, statusObj: statusObj, listeners: listeners });
+            return Promise.resolve(statusObj);
+          }
+          return origPermQuery(desc);
+        };
+      }
+    } catch (_e) {}
+  })();
+
   function abs(u) {
     if (!u) return null;
     var s = String(u).trim();
@@ -2385,6 +2785,8 @@
         }
       } catch (_e) {}
       setTimeout(function () { isReplayingSync = false; }, 60);
+    } else if (d.type === "rv:set_permissions" && d.permissions) {
+      applyUpdatedPermissionsConfig(d.permissions);
     } else if (d.type === "rv:run_diagnostics") {
       runVisualAudit(!!d.highlight);
       reportStorageSnapshot();
