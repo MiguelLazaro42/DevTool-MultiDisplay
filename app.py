@@ -586,19 +586,19 @@ ASSET_TAG_RE = re.compile(
     re.I,
 )
 SRC_HREF_ATTR_RE = re.compile(
-    r"(\b(?:src|href|poster|data-src)\s*=\s*)([\"'])([^\"']+)\2",
+    r"((?<=\s)(?:src|href|poster|data-src)\s*=\s*)([\"'])([^\"']+)\2",
     re.I,
 )
 SRCSET_ATTR_RE = re.compile(
-    r"(\bsrcset\s*=\s*)([\"'])([^\"']+)\2",
+    r"((?<=\s)srcset\s*=\s*)([\"'])([^\"']+)\2",
     re.I,
 )
-INTEGRITY_ATTR_RE = re.compile(r"\s+\b(?:integrity|crossorigin)\s*=\s*(?:[\"'][^\"']*[\"']|[^\s>]+)", re.I)
+INTEGRITY_ATTR_RE = re.compile(r"\s+(?<=\s)(?:integrity|crossorigin)\s*=\s*(?:[\"'][^\"']*[\"']|[^\s>]+)", re.I)
 CSS_URL_RE = re.compile(r"url\(\s*([\"']?)([^\"')]+)\1\s*\)", re.I)
 CSS_IMPORT_RE = re.compile(r"(@import\s+)(?:url\(\s*)?([\"'])([^\"')]+)\2(?:\s*\))?", re.I)
 
 STYLE_BLOCK_RE = re.compile(r"(<style\b[^>]*>)(.*?)(</style>)", re.I | re.S)
-STYLE_ATTR_RE = re.compile(r"(\bstyle\s*=\s*)([\"'])(.*?)\2", re.I | re.S)
+STYLE_ATTR_RE = re.compile(r"((?<=\s)style\s*=\s*)([\"'])(.*?)\2", re.I | re.S)
 
 PUBLIC_CDN_HOSTS = (
     "fonts.googleapis.com",
@@ -721,6 +721,8 @@ def _rewrite_html_assets_for_proxy(html_text, base_url, frame_id, device_id):
         def _repl_attr(attr_match):
             attr_prefix, quote_ch, raw_val = attr_match.group(1), attr_match.group(2), attr_match.group(3).strip()
             if not raw_val or raw_val.startswith(("data:", "blob:", "javascript:", "mailto:", "tel:", "about:", "#")) or "/proxy?" in raw_val:
+                return attr_match.group(0)
+            if any(tok in raw_val for tok in ("||", "&&", " ? ", "{{", "}}")):
                 return attr_match.group(0)
             abs_target = urljoin(base_url, raw_val)
             parsed_target = urlparse(abs_target)

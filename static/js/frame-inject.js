@@ -567,8 +567,16 @@
     return rawVal;
   }
 
+  function rewriteCssUrlsInString(val) {
+    if (!CERT_ACTIVE || typeof val !== "string" || val.indexOf("url(") === -1) return val;
+    return val.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, function (match, quote, innerUrl) {
+      var rewritten = rewriteAssetUrlIfNeeded(innerUrl);
+      return "url(" + quote + rewritten + quote + ")";
+    });
+  }
+
   if (CERT_ACTIVE) {
-    // 1. Interceptar setAttribute(src/href/poster) para que ningún recurso creado por JS conecte directo al servidor mTLS
+    // 1. Interceptar setAttribute(src/href/poster/style) para que ningún recurso creado por JS conecte directo al servidor mTLS
     var origSetAttr = Element.prototype.setAttribute;
     if (origSetAttr) {
       Element.prototype.setAttribute = function (name, val) {
@@ -580,17 +588,14 @@
           } else if (attrLower === "href" && tag === "link") {
             val = rewriteAssetUrlIfNeeded(val);
           } else if (attrLower === "style" && typeof val === "string" && val.indexOf("url(") > -1) {
-            val = val.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, function (match, quote, innerUrl) {
-              var rewritten = rewriteAssetUrlIfNeeded(innerUrl);
-              return "url(" + quote + rewritten + quote + ")";
-            });
+            val = rewriteCssUrlsInString(val);
           }
         } catch (_e) {}
         return origSetAttr.call(this, name, val);
       };
     }
 
-    // 2. Interceptar setters directos (.src / .href) en prototipos de elementos multimedia/scripts
+    // 2. Interceptar setters directos (.src / .href) en prototipos de elementos multimedia/scripts y CSSStyleDeclaration
     function patchUrlProperty(proto, propName) {
       if (!proto) return;
       try {
@@ -608,39 +613,97 @@
       } catch (_e) {}
     }
 
+    function patchCssStyleProperty(proto, propName) {
+      if (!proto) return;
+      try {
+        var desc = Object.getOwnPropertyDescriptor(proto, propName);
+        if (desc && typeof desc.set === "function") {
+          Object.defineProperty(proto, propName, {
+            configurable: true,
+            enumerable: desc.enumerable,
+            get: desc.get,
+            set: function (val) {
+              return desc.set.call(this, rewriteCssUrlsInString(val));
+            }
+          });
+        }
+      } catch (_e) {}
+    }
+
     if (typeof HTMLImageElement !== "undefined") patchUrlProperty(HTMLImageElement.prototype, "src");
     if (typeof HTMLScriptElement !== "undefined") patchUrlProperty(HTMLScriptElement.prototype, "src");
     if (typeof HTMLLinkElement !== "undefined") patchUrlProperty(HTMLLinkElement.prototype, "href");
     if (typeof HTMLSourceElement !== "undefined") patchUrlProperty(HTMLSourceElement.prototype, "src");
     if (typeof HTMLMediaElement !== "undefined") patchUrlProperty(HTMLMediaElement.prototype, "src");
 
+    if (typeof CSSStyleDeclaration !== "undefined") {
+      patchCssStyleProperty(CSSStyleDeclaration.prototype, "backgroundImage");
+      patchCssStyleProperty(CSSStyleDeclaration.prototype, "background");
+      patchCssStyleProperty(CSSStyleDeclaration.prototype, "cssText");
+      if (typeof CSSStyleDeclaration.prototype.setProperty === "function") {
+        var origSetProperty = CSSStyleDeclaration.prototype.setProperty;
+        CSSStyleDeclaration.prototype.setProperty = function (prop, val, priority) {
+          if (typeof val === "string" && val.indexOf("url(") > -1) {
+            val = rewriteCssUrlsInString(val);
+          }
+          return origSetProperty.call(this, prop, val, priority);
+        };
+      }
+    }
+
+    function sanitizeDomElementAssets(el) {
+      if (!el || el.nodeType !== 1 || !origSetAttr) return;
+      var tag = (el.tagName || "").toLowerCase();
+      if (tag === "script" || tag === "img" || tag === "source" || tag === "video" || tag === "audio") {
+        var rawSrc = el.getAttribute("src");
+        if (rawSrc && rawSrc.indexOf("/proxy?") === -1) {
+          var proxSrc = rewriteAssetUrlIfNeeded(rawSrc);
+          if (proxSrc !== rawSrc) origSetAttr.call(el, "src", proxSrc);
+        }
+      } else if (tag === "link") {
+        var rawHref = el.getAttribute("href");
+        if (rawHref && rawHref.indexOf("/proxy?") === -1) {
+          var proxHref = rewriteAssetUrlIfNeeded(rawHref);
+          if (proxHref !== rawHref) origSetAttr.call(el, "href", proxHref);
+        }
+      }
+      var rawStyle = el.getAttribute("style");
+      if (rawStyle && rawStyle.indexOf("url(") > -1 && rawStyle.indexOf("/proxy?") === -1) {
+        var proxStyle = rewriteCssUrlsInString(rawStyle);
+        if (proxStyle !== rawStyle) origSetAttr.call(el, "style", proxStyle);
+      }
+    }
+
     if (typeof MutationObserver === "function") {
       var certAssetObs = new MutationObserver(function (mutations) {
         for (var i = 0; i < mutations.length; i++) {
-          var added = mutations[i].addedNodes;
+          var m = mutations[i];
+          if (m.type === "attributes" && m.target && m.target.nodeType === 1) {
+            sanitizeDomElementAssets(m.target);
+            continue;
+          }
+          var added = m.addedNodes;
           if (!added) continue;
           for (var j = 0; j < added.length; j++) {
             var node = added[j];
             if (!node || node.nodeType !== 1) continue;
-            var tag = (node.tagName || "").toLowerCase();
-            if (tag === "script" || tag === "img" || tag === "source") {
-              var rawSrc = node.getAttribute("src");
-              if (rawSrc && rawSrc.indexOf("/proxy?") === -1) {
-                var proxSrc = rewriteAssetUrlIfNeeded(rawSrc);
-                if (proxSrc !== rawSrc) origSetAttr.call(node, "src", proxSrc);
-              }
-            } else if (tag === "link") {
-              var rawHref = node.getAttribute("href");
-              if (rawHref && rawHref.indexOf("/proxy?") === -1) {
-                var proxHref = rewriteAssetUrlIfNeeded(rawHref);
-                if (proxHref !== rawHref) origSetAttr.call(node, "href", proxHref);
+            sanitizeDomElementAssets(node);
+            if (node.querySelectorAll) {
+              var innerList = node.querySelectorAll("img[src], script[src], source[src], video[src], audio[src], link[href], [style*='url(']");
+              for (var k = 0; k < innerList.length; k++) {
+                sanitizeDomElementAssets(innerList[k]);
               }
             }
           }
         }
       });
       try {
-        certAssetObs.observe(document.documentElement || document, { childList: true, subtree: true });
+        certAssetObs.observe(document.documentElement || document, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["src", "href", "poster", "style"]
+        });
       } catch (_e) {}
     }
   }
