@@ -68,7 +68,9 @@
   var stackBtn = document.getElementById("stack-btn");
   var form = document.getElementById("search-form");
   var input = document.getElementById("url-input");
+  var refreshWrap = document.getElementById("refresh-wrap");
   var refreshBtn = document.getElementById("refresh-btn");
+  var refreshMenu = document.getElementById("refresh-menu");
   var addBtn = document.getElementById("add-btn");
   var menu = document.getElementById("device-menu");
   var toastEl = document.getElementById("toast");
@@ -476,8 +478,10 @@
     } catch (_e) { return ""; }
   }
 
-  function proxyUrl(url, deviceId, bust) {
-    var q = "/proxy?frame=" + encodeURIComponent(deviceId) +
+  function proxyUrl(url, deviceId, bust, tabId) {
+    var effectiveTabId = tabId || state.activeTabId || "tab-1";
+    var sessionFrameId = effectiveTabId + "__" + deviceId;
+    var q = "/proxy?frame=" + encodeURIComponent(sessionFrameId) +
       "&device=" + encodeURIComponent(deviceId) +
       "&lang=" + encodeURIComponent(I18N.getLang()) +
       "&url=" + encodeURIComponent(url);
@@ -887,6 +891,18 @@
       btn.appendChild(titleSpan);
 
       if (state.tabs.length > 1) {
+        var refreshTabSpan = document.createElement("span");
+        refreshTabSpan.className = "sim-tab-refresh";
+        refreshTabSpan.setAttribute("role", "button");
+        refreshTabSpan.setAttribute("aria-label", t("simTabRefreshHint", { num: tb.num }));
+        refreshTabSpan.title = t("simTabRefreshHint", { num: tb.num });
+        refreshTabSpan.appendChild(icon(["M16 10a6 6 0 1 1-1.76-4.24", "M16 3.5v3.2h-3.2"]));
+        refreshTabSpan.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          executeRefreshReset(tb.id);
+        });
+        btn.appendChild(refreshTabSpan);
+
         var closeSpan = document.createElement("span");
         closeSpan.className = "sim-tab-close";
         closeSpan.setAttribute("role", "button");
@@ -1051,6 +1067,16 @@
       }
     });
 
+    clearSiteCacheAndStorage(tabId);
+    if (!fromCrossTab) {
+      fetch("/api/reset", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tab_id: tabId })
+      }).catch(function () {});
+    }
+
     var wasActive = (state.activeTabId === tabId);
     state.tabs.splice(idx, 1);
     state.tabs.forEach(function (tb, j) { tb.num = j + 1; });
@@ -1181,7 +1207,7 @@
       ifr.removeAttribute("src");
       return;
     }
-    ifr.src = proxyUrl(url, id, bust);
+    ifr.src = proxyUrl(url, id, bust, tabId);
   }
 
   function toggleDevice(id, on) {
@@ -1880,33 +1906,40 @@
     postCrossTab({ type: "bc:load_url", url: url, tabId: state.activeTabId });
   });
 
-  // ---------- Refrescar (borra caché, storage del sitio y cookies) ----------
-  function clearDocumentCookies() {
-    // Cookies que la página puso con JavaScript en este origen.
+  // ---------- Refrescar (borra caché, storage del sitio y cookies por pestaña o global) ----------
+  function clearDocumentCookies(targetTabId) {
+    var tabCookiePrefix = targetTabId ? ("__rv_tc_" + targetTabId + "__") : "";
     document.cookie.split(";").forEach(function (c) {
       var name = c.split("=")[0].trim();
-      if (name) document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+      if (!name) return;
+      if (tabCookiePrefix && name.indexOf(tabCookiePrefix) !== 0) return;
+      document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
     });
   }
 
-  function clearSiteCacheAndStorage() {
-    clearDocumentCookies();
-    // Limpiar localStorage y sessionStorage de la app probada (preservando preferencias rv.* del visor)
+  function clearSiteCacheAndStorage(targetTabId) {
+    clearDocumentCookies(targetTabId);
+    var tabStoragePrefix = targetTabId ? ("__rv_ts_" + targetTabId + "__:") : "";
+    // Limpiar localStorage y sessionStorage de la pestaña indicada o de todas (preservando preferencias rv.* del visor)
     [window.localStorage, window.sessionStorage].forEach(function (st) {
       if (!st) return;
       try {
         var toRemove = [];
         for (var i = 0; i < st.length; i++) {
           var k = st.key(i);
-          if (k && k.indexOf("rv.") !== 0) {
+          if (!k || k.indexOf("rv.") === 0) continue;
+          if (tabStoragePrefix) {
+            if (k.indexOf(tabStoragePrefix) === 0) {
+              toRemove.push(k);
+            }
+          } else {
             toRemove.push(k);
           }
         }
         toRemove.forEach(function (k) { st.removeItem(k); });
       } catch (_e) {}
     });
-    // Limpiar CacheStorage (Service Workers / PWA caches) si existe
-    if (window.caches && typeof window.caches.keys === "function") {
+    if (!targetTabId && window.caches && typeof window.caches.keys === "function") {
       try {
         window.caches.keys().then(function (names) {
           names.forEach(function (n) { window.caches.delete(n); });
@@ -1915,9 +1948,24 @@
     }
   }
 
-  function applyLocalReloadAndClear() {
-    clearSiteCacheAndStorage();
+  function applyLocalReloadAndClear(targetTabId) {
+    var cleanTabId = (typeof targetTabId === "string" && targetTabId) ? targetTabId : "";
+    clearSiteCacheAndStorage(cleanTabId);
     snapshotImageCache = {};
+
+    if (cleanTabId) {
+      var targetTb = getVirtualTabById(cleanTabId);
+      state.active.forEach(function (id) {
+        var devUrl = (targetTb && targetTb.frameUrls && targetTb.frameUrls[id]) ||
+          (targetTb && targetTb.url) ||
+          (cleanTabId === state.activeTabId ? (state.frameUrls[id] || state.url) : "");
+        if (devUrl) {
+          navigateFrame(id, devUrl, true, cleanTabId);
+        }
+      });
+      return;
+    }
+
     trafficState.items = [];
     trafficState.lastSeq = 0;
     trafficState.selectedId = null;
@@ -1951,6 +1999,19 @@
     renderFlowDetail();
     renderStorageTable();
     renderStorageDetail();
+
+    // Limpiar iframes en segundo plano para que al cambiar a otra pestaña también recargue con sesión limpia
+    state.active.forEach(function (id) {
+      var e = els[id];
+      if (e && e.tabIframes) {
+        Object.keys(e.tabIframes).forEach(function (k) {
+          if (k !== state.activeTabId && e.tabIframes[k]) {
+            e.tabIframes[k].removeAttribute("src");
+          }
+        });
+      }
+    });
+
     if (state.url) {
       state.active.forEach(function (id) {
         navigateFrame(id, state.frameUrls[id] || state.url, true);
@@ -1958,20 +2019,37 @@
     }
   }
 
-  refreshBtn.addEventListener("click", function () {
+  function closeRefreshMenu() {
+    if (refreshMenu) refreshMenu.hidden = true;
+  }
+
+  function executeRefreshReset(targetTabId) {
+    closeRefreshMenu();
     if (refreshBtn.disabled) return;
     refreshBtn.disabled = true;
     refreshBtn.classList.add("is-busy");
 
-    fetch("/api/reset", { method: "POST", credentials: "same-origin" })
+    var cleanTabId = (typeof targetTabId === "string" && targetTabId) ? targetTabId : "";
+    fetch("/api/reset", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tab_id: cleanTabId })
+    })
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();
       })
       .then(function () {
-        applyLocalReloadAndClear();
-        postCrossTab({ type: "bc:reload" });
-        toast(state.url ? t("toastCleared") : t("toastClearedNoUrl"));
+        applyLocalReloadAndClear(cleanTabId);
+        postCrossTab({ type: "bc:reload", targetTabId: cleanTabId });
+        if (cleanTabId) {
+          var tbObj = getVirtualTabById(cleanTabId);
+          var num = tbObj ? tbObj.num : 1;
+          toast(t("toastClearedTab", { num: num }));
+        } else {
+          toast(state.url ? t("toastCleared") : t("toastClearedNoUrl"));
+        }
       })
       .catch(function () {
         toast(t("toastResetFailed"));
@@ -1980,6 +2058,72 @@
         refreshBtn.disabled = false;
         refreshBtn.classList.remove("is-busy");
       });
+  }
+
+  function openRefreshScopeMenu() {
+    if (!refreshMenu) {
+      executeRefreshReset(state.activeTabId);
+      return;
+    }
+    refreshMenu.innerHTML = "";
+    var activeTb = getActiveVirtualTab();
+    var curNum = activeTb ? activeTb.num : 1;
+
+    var btnSingle = document.createElement("button");
+    btnSingle.type = "button";
+    btnSingle.className = "refresh-menu-item";
+    var singleTitle = document.createElement("span");
+    singleTitle.className = "refresh-menu-title";
+    singleTitle.textContent = t("refreshOnlyThisTab", { num: curNum });
+    var singleSub = document.createElement("span");
+    singleSub.className = "refresh-menu-sub";
+    singleSub.textContent = t("refreshOnlyThisTabSub");
+    btnSingle.appendChild(singleTitle);
+    btnSingle.appendChild(singleSub);
+    btnSingle.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      executeRefreshReset(state.activeTabId);
+    });
+
+    var btnAll = document.createElement("button");
+    btnAll.type = "button";
+    btnAll.className = "refresh-menu-item";
+    var allTitle = document.createElement("span");
+    allTitle.className = "refresh-menu-title";
+    allTitle.textContent = t("refreshAllTabs", { n: state.tabs.length });
+    var allSub = document.createElement("span");
+    allSub.className = "refresh-menu-sub";
+    allSub.textContent = t("refreshAllTabsSub");
+    btnAll.appendChild(allTitle);
+    btnAll.appendChild(allSub);
+    btnAll.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      executeRefreshReset("");
+    });
+
+    refreshMenu.appendChild(btnSingle);
+    refreshMenu.appendChild(btnAll);
+    refreshMenu.hidden = false;
+  }
+
+  refreshBtn.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    if (refreshBtn.disabled) return;
+    if (state.tabs.length > 1) {
+      if (refreshMenu && !refreshMenu.hidden) {
+        closeRefreshMenu();
+      } else {
+        openRefreshScopeMenu();
+      }
+      return;
+    }
+    executeRefreshReset("");
+  });
+
+  document.addEventListener("pointerdown", function (ev) {
+    if (refreshMenu && !refreshMenu.hidden && (!refreshWrap || !refreshWrap.contains(ev.target))) {
+      closeRefreshMenu();
+    }
   });
 
   // Las páginas avisan cuando el usuario navega dentro de una pantalla,
@@ -2450,7 +2594,7 @@
     }
     if (msg.type === "bc:reload") {
       fetchCertStatus();
-      applyLocalReloadAndClear();
+      applyLocalReloadAndClear(msg.targetTabId || "");
       return;
     }
     if (msg.type === "bc:sync_tabs_state" && Array.isArray(msg.tabs)) {

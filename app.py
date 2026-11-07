@@ -806,7 +806,8 @@ def _resolve_iframe_relative_context():
         return None
 
     frame_id = re.sub(r"[^A-Za-z0-9_-]", "", frame_id)[:64] or "default"
-    device = DEVICES_BY_ID.get(device_id) or DEVICES_BY_ID.get(frame_id) or DEVICES[0]
+    fallback_dev_id = frame_id.split("__", 1)[-1] if "__" in frame_id else frame_id
+    device = DEVICES_BY_ID.get(device_id) or DEVICES_BY_ID.get(fallback_dev_id) or DEVICES[0]
     return base_url, frame_id, device
 
 
@@ -1015,7 +1016,8 @@ def proxy():
                 url = base_url
 
     frame_id = re.sub(r"[^A-Za-z0-9_-]", "", raw_frame)[:64] or "default"
-    device = DEVICES_BY_ID.get(raw_device) or DEVICES_BY_ID.get(frame_id) or DEVICES[0]
+    fallback_dev_id = frame_id.split("__", 1)[-1] if "__" in frame_id else frame_id
+    device = DEVICES_BY_ID.get(raw_device) or DEVICES_BY_ID.get(fallback_dev_id) or DEVICES[0]
     return _execute_proxy(url, frame_id, device)
 
 
@@ -1036,9 +1038,36 @@ def catch_all_relative_proxy(_err):
 
 @app.route("/api/reset", methods=["POST"])
 def reset():
-    """Borra todo el caché y las cookies: las sesiones del servidor (un jar por
-    pantalla), el caché HTTP del navegador, telemetría previa y las cookies de este origen."""
+    """Borra el caché y las cookies: ya sea únicamente de una pestaña virtual
+    específica (`tab_id`) para conservar sesiones activas en las demás pestañas,
+    o de todas las pestañas cuando no se especifica `tab_id`."""
     global _last_inspected
+    payload = request.get_json(silent=True) or {}
+    target_tab_id = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("tab_id") or "").strip())[:40]
+
+    if target_tab_id:
+        prefix = f"{target_tab_id}__"
+        with _sessions_lock:
+            keys_to_clear = [
+                k for k in _sessions
+                if k.startswith(prefix) or (target_tab_id == "tab-1" and "__" not in k)
+            ]
+            cleared = len(keys_to_clear)
+            for k in keys_to_clear:
+                try:
+                    _sessions[k].close()
+                except Exception:
+                    pass
+                del _sessions[k]
+
+        resp = jsonify({"ok": True, "cleared_sessions": cleared, "tab_id": target_tab_id})
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        cookie_prefix = f"__rv_tc_{target_tab_id}__"
+        for name in request.cookies:
+            if name.startswith(cookie_prefix):
+                resp.delete_cookie(name)
+        return resp
+
     with _sessions_lock:
         cleared = len(_sessions)
         for session in _sessions.values():
@@ -1062,7 +1091,7 @@ def reset():
         _inspected_by_tier.clear()
         _inspected_by_device.clear()
 
-    resp = jsonify({"ok": True, "cleared_sessions": cleared})
+    resp = jsonify({"ok": True, "cleared_sessions": cleared, "tab_id": ""})
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     for name in request.cookies:
         resp.delete_cookie(name)
@@ -1274,7 +1303,8 @@ def api_storage():
     with _sessions_lock:
         session_snapshot = list(_sessions.items())
     for frame_id, sess in session_snapshot:
-        device = DEVICES_BY_ID.get(frame_id, {"id": frame_id, "name": frame_id})
+        dev_key = frame_id.split("__", 1)[-1] if "__" in frame_id else frame_id
+        device = DEVICES_BY_ID.get(dev_key, {"id": dev_key, "name": dev_key})
         try:
             for c in sess.cookies:
                 seq += 1

@@ -10,7 +10,7 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=38">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}?v=39">
 </head>
 
 <body>
@@ -500,14 +500,17 @@
       </button>
     </div>
 
-    <button type="button" class="bar btn btn-refresh" id="refresh-btn"
-      title="Reload every screen and clear cache, storage & cookies" data-i18n-title="refreshTitle">
-      <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
-        <path d="M16 10a6 6 0 1 1-1.76-4.24" />
-        <path d="M16 3.5v3.2h-3.2" />
-      </svg>
-      <span class="btn-refresh-text" data-i18n="refresh">Refresh</span>
-    </button>
+    <div class="bar bar-refresh" id="refresh-wrap">
+      <button type="button" class="btn btn-refresh" id="refresh-btn"
+        title="Reload every screen and clear cache, storage & cookies" data-i18n-title="refreshTitle">
+        <svg class="bar-icon" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M16 10a6 6 0 1 1-1.76-4.24" />
+          <path d="M16 3.5v3.2h-3.2" />
+        </svg>
+        <span class="btn-refresh-text" data-i18n="refresh">Refresh</span>
+      </button>
+      <div class="refresh-menu" id="refresh-menu" role="menu" hidden></div>
+    </div>
 
     <div class="bar bar-add">
       <button type="button" class="btn btn-add" id="add-btn" aria-haspopup="menu" aria-expanded="false"
@@ -638,8 +641,8 @@
   <script id="devices-data" type="application/json">{{ devices|tojson }}</script>
   <script id="defaults-data" type="application/json">{{ default_device_ids|tojson }}</script>
   <script id="workspace-data" type="application/json">{{ workspace|tojson }}</script>
-  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=38"></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=38"></script>
+  <script src="{{ url_for('static', filename='js/i18n.js') }}?v=39"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=39"></script>
 </body>
 
 </html>

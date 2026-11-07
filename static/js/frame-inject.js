@@ -9,10 +9,120 @@
        "rechazó la conexión" dentro del iframe. */
 (function () {
   "use strict";
-  var F = __FRAME__, D = __DEVICE__;
+  var SESSION_FRAME = __FRAME__, D = __DEVICE__;
+  var F = D;
+  var TAB_ID = (typeof SESSION_FRAME === "string" && SESSION_FRAME.indexOf("__") > -1)
+    ? SESSION_FRAME.split("__")[0]
+    : "tab-1";
+  var TAB_STORAGE_PREFIX = "__rv_ts_" + TAB_ID + "__:";
+  var TAB_COOKIE_PREFIX = "__rv_tc_" + TAB_ID + "__";
   var CERT_ACTIVE = (typeof __CERT_ACTIVE__ !== "undefined") ? !!__CERT_ACTIVE__ : false;
   var BASE_URL = (typeof __BASE_URL__ === "string" && __BASE_URL__) ? __BASE_URL__ : document.baseURI;
   var ORIGIN = location.origin;
+
+  // ---------- Aislamiento de sesión por Pestaña Virtual (localStorage, sessionStorage y document.cookie) ----------
+  // Permite tener distintos usuarios / sesiones iniciadas simultáneamente en Pestaña 1, Pestaña 2, etc.
+  (function isolateClientSessionByTab() {
+    try {
+      var rawGetItem = Storage.prototype.getItem;
+      var rawSetItem = Storage.prototype.setItem;
+      var rawRemoveItem = Storage.prototype.removeItem;
+      var rawKey = Storage.prototype.key;
+      var rawLenDesc = Object.getOwnPropertyDescriptor(Storage.prototype, "length");
+
+      function isInternalKey(k) {
+        var s = String(k || "");
+        return s.indexOf("rv.") === 0 || s.indexOf("__rv_ts_") === 0;
+      }
+
+      function getScopedKeys(storageObj) {
+        var res = [];
+        try {
+          var total = rawLenDesc && rawLenDesc.get ? rawLenDesc.get.call(storageObj) : 0;
+          for (var i = 0; i < total; i++) {
+            var fullKey = rawKey.call(storageObj, i);
+            if (fullKey && fullKey.indexOf(TAB_STORAGE_PREFIX) === 0) {
+              res.push(fullKey.slice(TAB_STORAGE_PREFIX.length));
+            }
+          }
+        } catch (_e) {}
+        return res;
+      }
+
+      Storage.prototype.getItem = function (k) {
+        var sk = isInternalKey(k) ? String(k) : (TAB_STORAGE_PREFIX + String(k));
+        return rawGetItem.call(this, sk);
+      };
+      Storage.prototype.setItem = function (k, v) {
+        var sk = isInternalKey(k) ? String(k) : (TAB_STORAGE_PREFIX + String(k));
+        return rawSetItem.call(this, sk, String(v));
+      };
+      Storage.prototype.removeItem = function (k) {
+        var sk = isInternalKey(k) ? String(k) : (TAB_STORAGE_PREFIX + String(k));
+        return rawRemoveItem.call(this, sk);
+      };
+      Storage.prototype.clear = function () {
+        try {
+          var total = rawLenDesc && rawLenDesc.get ? rawLenDesc.get.call(this) : 0;
+          var toDel = [];
+          for (var i = 0; i < total; i++) {
+            var fk = rawKey.call(this, i);
+            if (fk && fk.indexOf(TAB_STORAGE_PREFIX) === 0) {
+              toDel.push(fk);
+            }
+          }
+          for (var j = 0; j < toDel.length; j++) {
+            rawRemoveItem.call(this, toDel[j]);
+          }
+        } catch (_e) {}
+      };
+      Storage.prototype.key = function (idx) {
+        var keys = getScopedKeys(this);
+        return (idx >= 0 && idx < keys.length) ? keys[idx] : null;
+      };
+      if (rawLenDesc && rawLenDesc.configurable) {
+        Object.defineProperty(Storage.prototype, "length", {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            return getScopedKeys(this).length;
+          }
+        });
+      }
+    } catch (_e) {}
+
+    try {
+      var cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, "cookie") ||
+        (typeof HTMLDocument !== "undefined" && Object.getOwnPropertyDescriptor(HTMLDocument.prototype, "cookie"));
+      if (cookieDesc && typeof cookieDesc.get === "function" && typeof cookieDesc.set === "function") {
+        Object.defineProperty(document, "cookie", {
+          configurable: true,
+          enumerable: true,
+          get: function () {
+            var raw = cookieDesc.get.call(document) || "";
+            if (!raw) return "";
+            var parts = raw.split(";");
+            var out = [];
+            for (var i = 0; i < parts.length; i++) {
+              var p = parts[i].trim();
+              if (p.indexOf(TAB_COOKIE_PREFIX) === 0) {
+                out.push(p.slice(TAB_COOKIE_PREFIX.length));
+              }
+            }
+            return out.join("; ");
+          },
+          set: function (val) {
+            var s = String(val || "").trim();
+            if (!s) return;
+            if (s.indexOf(TAB_COOKIE_PREFIX) !== 0) {
+              s = TAB_COOKIE_PREFIX + s;
+            }
+            return cookieDesc.set.call(document, s);
+          }
+        });
+      }
+    } catch (_e) {}
+  })();
 
   function abs(u) {
     if (!u) return null;
@@ -25,7 +135,7 @@
     return !!u && /^https?:/i.test(u) && new URL(u).origin !== ORIGIN;
   }
   function via(u) {
-    return ORIGIN + "/proxy?frame=" + encodeURIComponent(F) +
+    return ORIGIN + "/proxy?frame=" + encodeURIComponent(SESSION_FRAME) +
       "&device=" + encodeURIComponent(D) + "&url=" + encodeURIComponent(u);
   }
 

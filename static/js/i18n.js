@@ -127,10 +127,16 @@
       certRemoved: "Client certificate removed.",
       simTabLabel: "Tab {num}",
       simTabEmpty: "New tab",
-      simTabAddHint: "Open a new virtual tab across all simulated devices",
+      simTabAddHint: "Open a new virtual tab across all simulated devices (independent session)",
       simTabCloseHint: "Close Tab {num}",
+      simTabRefreshHint: "Clear session/cookies & reload only Tab {num}",
       simTabSwitchHint: "Switch all devices to Tab {num} ({url})",
-      toastNewTabOpened: "Opened in Tab {num}: {title}"
+      toastNewTabOpened: "Opened in Tab {num}: {title}",
+      refreshOnlyThisTab: "Clear & reload Tab {num} only",
+      refreshOnlyThisTabSub: "Keeps sessions in other tabs active",
+      refreshAllTabs: "Clear & reload all tabs ({n})",
+      refreshAllTabsSub: "Clears cookies & sessions across all tabs",
+      toastClearedTab: "Tab {num} session & cookies cleared. Reloaded."
     },
     es: {
       screens: "Pantallas",
@@ -254,10 +260,16 @@
       certRemoved: "Certificado .p12 desactivado.",
       simTabLabel: "Pestaña {num}",
       simTabEmpty: "Nueva pestaña",
-      simTabAddHint: "Abrir una nueva pestaña virtual en todos los dispositivos simulados",
+      simTabAddHint: "Abrir una nueva pestaña virtual con sesión independiente en todos los dispositivos",
       simTabCloseHint: "Cerrar Pestaña {num}",
+      simTabRefreshHint: "Limpiar sesión/cookies y recargar solo Pestaña {num}",
       simTabSwitchHint: "Cambiar todos los dispositivos a la Pestaña {num} ({url})",
-      toastNewTabOpened: "Abierto en Pestaña {num}: {title}"
+      toastNewTabOpened: "Abierto en Pestaña {num}: {title}",
+      refreshOnlyThisTab: "Solo Pestaña {num} (actual)",
+      refreshOnlyThisTabSub: "Limpia cookies/sesión solo aquí; conserva las demás pestañas",
+      refreshAllTabs: "Todas las pestañas ({n})",
+      refreshAllTabsSub: "Borra cookies, caché y sesiones de todas las pestañas",
+      toastClearedTab: "Sesión y cookies de Pestaña {num} limpiadas y recargadas."
     }
   };
 
