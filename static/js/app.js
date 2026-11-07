@@ -604,6 +604,7 @@
     iframe.title = t("frameTitle", { name: d.name });
     // Sin allow-top-navigation: la página no puede sacar al usuario del visor.
     iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups allow-modals");
+    iframe.setAttribute("allow", "geolocation *; microphone *; camera *; clipboard-read *; clipboard-write *; fullscreen *; autoplay *; display-capture *");
     iframe.hidden = true;
     iframe.addEventListener("load", function () {
       var curE = els[id];

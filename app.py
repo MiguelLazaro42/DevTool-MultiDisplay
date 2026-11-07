@@ -521,6 +521,8 @@ DROPPED_HEADERS = {
     "x-frame-options",
     "content-security-policy",
     "content-security-policy-report-only",
+    "permissions-policy",
+    "feature-policy",
     "set-cookie",
     "content-encoding",
     "content-length",
