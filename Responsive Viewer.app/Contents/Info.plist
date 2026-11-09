@@ -4,6 +4,8 @@
 <dict>
   <key>CFBundleExecutable</key>
   <string>launcher</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>com.devtool.responsive-viewer</string>
   <key>CFBundleName</key>
@@ -14,7 +16,5 @@
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
   <string>2.0</string>
-  <key>LSUIElement</key>
-  <true/>
 </dict>
 </plist>
