@@ -11,10 +11,14 @@ Entorno de visualización multi-dispositivo, sincronización interactiva y depur
 ### 1. Visualización multi-dispositivo y soporte multi-plantilla
 - **Barra de dirección**: escribe cualquier URL (`http://` o `https://`) y presiona Enter. Cada pantalla solicita el sitio a través del proxy local enviando su propio `User-Agent`, `Sec-CH-UA-Mobile`, `Sec-CH-UA-Platform`, `Viewport-Width` y `X-Device-Type`.
 - **Soporte para plantillas separadas (Móvil vs. Escritorio)**: si tu servidor entrega un HTML distinto según el dispositivo (por ejemplo, una plantilla exclusiva para móvil y otra para escritorio), cada visor recibe y renderiza su plantilla correspondiente.
-- **Sesiones aisladas y limpieza completa de caché**: cada dispositivo mantiene su propio contenedor de cookies en el servidor. El botón **Refresh** (`borra caché y cookies`) recarga todas las pantallas purgando el caché HTTP del navegador (`Clear-Site-Data: "cache", "cookies"`), `CacheStorage` (Service Workers), `localStorage` / `sessionStorage` del sitio probado y todas las cookies de sesión.
+- **Pestañas virtuales con sesiones independientes (`Pestaña 1`, `Pestaña 2`, `+`)**:
+  - Los enlaces con `target="_blank"` o llamadas a `window.open()` se abren automáticamente en una nueva pestaña virtual sincronizada en todos los dispositivos.
+  - Cada pestaña virtual mantiene su **propia sesión aislada** (cookies de servidor, `document.cookie`, `localStorage` y `sessionStorage` independientes por pestaña), permitiendo iniciar sesión con distintos usuarios o roles en cada pestaña simultáneamente.
+  - **Limpieza selectiva de sesión (`Refresh`)**: cuando hay varias pestañas abiertas, el botón **Refresh** (y el ícono de recarga en cada pestaña) permite elegir entre limpiar caché/cookies **solo de la pestaña actual** (conservando las sesiones de las demás) o **de todas las pestañas**.
 
-### 2. Sincronización inteligente entre pantallas (`Sync`)
-- **Clics, formularios y teclado**: replica clics, escritura en campos de texto (`input` / `change`), envíos de formularios y pulsaciones de la tecla `Escape` en todas las vistas activas.
+### 2. Sincronización inteligente entre pantallas y monitores (`Sync`)
+- **Sincronización multi-monitor en tiempo real**: sincroniza pestañas virtuales, navegación, clics, escritura, scroll y controles de la barra de herramientas entre la ventana principal y ventanas secundarias/monitores verticales mediante un bus triple (`BroadcastChannel` + `localStorage` + `/api/sync-bus`).
+- **Clics, formularios y teclado**: replica clics, escritura en campos de texto (`input` / `change`), envíos de formularios (incluyendo envío con tecla `Enter`) y pulsaciones de `Escape` en todas las vistas activas.
 - **Búsqueda semántica entre plantillas**: cuando las estructuras DOM de móvil y escritorio difieren, localiza el elemento equivalente por `id`, atributos de pruebas, `href`, texto visible o etiquetas `aria-label`.
 - **Scroll proporcional**: sincroniza el desplazamiento vertical y horizontal por porcentaje (`ratioY` / `ratioX`) tanto en el documento como dentro de contenedores desplazables.
 - **Sincronización de modales, drawers y bottom sheets**:
@@ -69,6 +73,15 @@ En la barra inferior puedes abrir y acoplar (abajo o a la derecha) el panel de h
   6. **Flujo de Pasos (Reproducción)**: secuencia cronológica exacta de lo que hiciste antes del fallo.
   7. **Storage / Cookies / JWT**: estado de sesión relevante.
 
+### 9. Simulador de Ubicación GPS y Permisos (`GPS`)
+Desde el botón **GPS** de la barra inferior puedes controlar cómo responden todos los dispositivos simulados ante solicitudes de permisos del navegador:
+- **Ubicación GPS (`navigator.geolocation`)**:
+  - **Real**: utiliza el permiso y GPS real del navegador.
+  - **Simular coordenadas (Permitir siempre)**: responde al instante a `getCurrentPosition` y `watchPosition` con presets de ciudades (Ciudad del Carmen, Campeche, Mérida, Cancún, CDMX, Monterrey, Guadalajara, Madrid, Miami) o coordenadas personalizadas (`lat`, `lng`, `accuracy`), actualizando en vivo cualquier mapa o rastreador activo.
+  - **Bloquear**: simula rechazo del usuario (`PERMISSION_DENIED`).
+- **Cámara y Micrófono (`navigator.mediaDevices.getUserMedia`)**: permite usar el hardware real, inyectar un stream de **Cámara Virtual (640×480)** y **Micrófono Virtual (WebAudio)** para pruebas sin encender la cámara física, o bloquear el permiso (`NotAllowedError`).
+- **Notificaciones (`Notification` API + `navigator.permissions.query`)**: permite usar el comportamiento real, simular permiso concedido mostrando un aviso en el visor, o simular bloqueo (`denied`).
+
 ---
 
 ## Instalación
@@ -87,9 +100,11 @@ Solo necesitas **Python 3.9 o superior** y `openssl` (incluido por defecto en ma
    bash install.sh
    ```
 3. Para iniciarlo en ocasiones posteriores:
-   ```bash
-   ./start.sh
-   ```
+   - En **macOS**, haz doble clic en **`Responsive Viewer.app`** (puedes copiarla a `/Applications` o al Dock) o en **`Abrir Responsive Viewer.command`**. Levanta el servidor en segundo plano si estaba apagado y abre el navegador restaurando tus pestañas, dispositivos y sesiones.
+   - O desde terminal:
+     ```bash
+     ./start.sh
+     ```
 
 ### Windows
 
