@@ -2227,6 +2227,7 @@
         if (els[d.frame]) state.frameUrls[d.frame] = d.url;
         if (d.url) {
           state.url = d.url;
+          store(STORE_URL, d.url);
           if (input && document.activeElement !== input) input.value = d.url;
         }
       }

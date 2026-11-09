@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+APP_PARENT="$(cd "$(dirname "$0")/../../.." && pwd)"
+if [ -f "$APP_PARENT/app.py" ]; then
+  DIR="$APP_PARENT"
+else
+  DIR="/Users/miguellazarosantiago/Documents/Tools/DevTool"
+fi
+
+cd "$DIR" || exit 1
+mkdir -p "$DIR/.certs"
+
+PORT=5050
+URL="http://127.0.0.1:${PORT}"
+
+if ! /usr/bin/curl -s -o /dev/null --max-time 1 "${URL}/api/cert"; then
+  if [ ! -x "$DIR/.venv/bin/python" ]; then
+    "$DIR/install.sh"
+  fi
+  /usr/bin/nohup "$DIR/.venv/bin/python" "$DIR/app.py" --port "$PORT" --no-browser > "$DIR/.certs/server.log" 2>&1 &
+  for _ in $(seq 1 25); do
+    if /usr/bin/curl -s -o /dev/null --max-time 1 "${URL}/api/cert"; then
+      break
+    fi
+    /bin/sleep 0.2
+  done
+fi
+
+/usr/bin/open "$URL"
+exit 0

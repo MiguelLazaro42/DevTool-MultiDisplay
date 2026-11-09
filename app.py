@@ -51,6 +51,7 @@ CERTS_DIR = os.path.join(BASE_DIR, ".certs")
 ACTIVE_PEM_PATH = os.path.join(CERTS_DIR, "active_client_cert.pem")
 ACTIVE_META_PATH = os.path.join(CERTS_DIR, "active_cert.json")
 WORKSPACE_STATE_PATH = os.path.join(CERTS_DIR, "workspace_state.json")
+SESSION_COOKIES_PATH = os.path.join(CERTS_DIR, "session_cookies.json")
 
 _workspace_lock = threading.Lock()
 _workspace_state = {
@@ -423,6 +424,61 @@ load_persisted_workspace()
 # Una sesión de requests (con su propio jar de cookies) por pantalla.
 _sessions = {}
 _sessions_lock = threading.Lock()
+
+
+def save_persisted_session_cookies():
+    """Guarda en disco las cookies de cada sesión/pestaña para conservar inicios de sesión al reiniciar."""
+    os.makedirs(CERTS_DIR, exist_ok=True)
+    with _sessions_lock:
+        dump = {}
+        for fid, sess in _sessions.items():
+            items = []
+            for c in sess.cookies:
+                items.append({
+                    "name": c.name,
+                    "value": c.value,
+                    "domain": c.domain or "",
+                    "path": c.path or "/",
+                })
+            if items:
+                dump[fid] = items
+        try:
+            with open(SESSION_COOKIES_PATH, "w", encoding="utf-8") as cf:
+                json.dump(dump, cf, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
+def load_persisted_session_cookies():
+    """Restaura las cookies guardadas en disco para cada sesión/pestaña."""
+    if not os.path.isfile(SESSION_COOKIES_PATH):
+        return
+    try:
+        with open(SESSION_COOKIES_PATH, encoding="utf-8") as cf:
+            dump = json.load(cf)
+        if not isinstance(dump, dict):
+            return
+        with _sessions_lock:
+            for fid, items in dump.items():
+                if not isinstance(fid, str) or not isinstance(items, list):
+                    continue
+                sess = _sessions.get(fid)
+                if sess is None:
+                    sess = requests.Session()
+                    _sessions[fid] = sess
+                for it in items:
+                    if isinstance(it, dict) and it.get("name"):
+                        sess.cookies.set(
+                            str(it["name"]),
+                            str(it.get("value") or ""),
+                            domain=str(it.get("domain") or ""),
+                            path=str(it.get("path") or "/"),
+                        )
+    except Exception:
+        pass
+
+
+load_persisted_session_cookies()
 
 # Historial de peticiones HTTP (estilo Burp Suite HTTP History).
 _traffic_log = collections.deque(maxlen=400)
@@ -961,6 +1017,9 @@ def _execute_proxy(url, frame_id, device):
     body = upstream.content
     final_url = upstream.url or url
 
+    if any(k.lower() == "set-cookie" for k in upstream.headers.keys()):
+        save_persisted_session_cookies()
+
     is_html_doc = "text/html" in content_type.lower() and (is_document or sec_dest in ("", "empty"))
 
     if is_html_doc:
@@ -1103,6 +1162,7 @@ def reset():
                 except Exception:
                     pass
                 del _sessions[k]
+        save_persisted_session_cookies()
 
         resp = jsonify({"ok": True, "cleared_sessions": cleared, "tab_id": target_tab_id})
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -1117,6 +1177,7 @@ def reset():
         for session in _sessions.values():
             session.close()
         _sessions.clear()
+    save_persisted_session_cookies()
 
     with _storage_lock:
         _client_storage_by_device.clear()
