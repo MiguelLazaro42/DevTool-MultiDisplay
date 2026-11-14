@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-APP_PARENT="$(cd "$(dirname "$0")/../../.." && pwd)"
-if [ -f "$APP_PARENT/app.py" ]; then
+BUNDLE_RES_APP="$(cd "$(dirname "$0")/../Resources/app" 2>/dev/null && pwd)"
+APP_PARENT="$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)"
+
+if [ -n "$BUNDLE_RES_APP" ] && [ -f "$BUNDLE_RES_APP/app.py" ] && [ -x "$BUNDLE_RES_APP/.venv/bin/python" ]; then
+  DIR="$BUNDLE_RES_APP"
+elif [ -n "$APP_PARENT" ] && [ -f "$APP_PARENT/app.py" ] && [ -r "$APP_PARENT/.venv/pyvenv.cfg" ]; then
   DIR="$APP_PARENT"
 else
   DIR="/Users/miguellazarosantiago/Documents/Tools/DevTool"
@@ -11,13 +15,17 @@ mkdir -p "$DIR/.certs"
 
 PORT=5050
 URL="http://127.0.0.1:${PORT}"
+PLIST="$HOME/Library/LaunchAgents/com.devtool.responsive-viewer.plist"
 
 if ! /usr/bin/curl -s -o /dev/null --max-time 1 "${URL}/api/cert"; then
-  if [ ! -x "$DIR/.venv/bin/python" ]; then
-    "$DIR/install.sh"
+  if [ -f "$PLIST" ]; then
+    /bin/launchctl bootstrap "gui/$(/usr/bin/id -u)" "$PLIST" 2>/dev/null || true
+    /bin/launchctl kickstart -p "gui/$(/usr/bin/id -u)/com.devtool.responsive-viewer" 2>/dev/null || true
+  else
+    /usr/bin/nohup "$DIR/.venv/bin/python" "$DIR/app.py" --port "$PORT" --no-browser > "$DIR/.certs/server.log" 2>&1 &
   fi
-  /usr/bin/nohup "$DIR/.venv/bin/python" "$DIR/app.py" --port "$PORT" --no-browser > "$DIR/.certs/server.log" 2>&1 &
-  for _ in $(seq 1 25); do
+
+  for _ in $(seq 1 35); do
     if /usr/bin/curl -s -o /dev/null --max-time 1 "${URL}/api/cert"; then
       break
     fi
